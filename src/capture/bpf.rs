@@ -6,6 +6,7 @@ use crate::capture::cap_filter::CaptureFilter;
 use crate::dissect::packet::LinkType;
 
 #[repr(C)]
+#[derive(Clone, Copy, Debug)]
 pub struct SockFilter {
     pub code: u16,
     pub jt: u8,

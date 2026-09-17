@@ -11,8 +11,8 @@ use std::time::SystemTime;
 use anyhow::{bail, Context, Result};
 use bytes::Bytes;
 use libc::{
-    c_uint, c_void, ifreq, ioctl, BIOCGBLEN, BIOCIMMEDIATE, BIOCPROMISC, BIOCSBLEN, BIOCSETF,
-    BIOCSETIF, BIOCVERSION,
+    c_uint, c_ulong, c_void, ifreq, ioctl, BIOCGBLEN, BIOCIMMEDIATE, BIOCPROMISC, BIOCSBLEN,
+    BIOCSETF, BIOCSETIF, BIOCVERSION,
 };
 
 use crate::capture::backend::{CapturePacket, IfaceInfo, LiveCapture};
@@ -60,7 +60,6 @@ pub struct MacCapture {
     iface: String,
     link_type: LinkType,
     rr: usize,
-    bpf_prog: Option<Vec<SockFilter>>,
 }
 
 struct BpfDev {
@@ -102,20 +101,17 @@ impl MacCapture {
             iface: name.to_string(),
             link_type,
             rr: 0,
-            bpf_prog: None,
         })
     }
 
     /// Attach classic BPF via BIOCSETF when the expression compiles; else leave userspace-only.
     pub fn set_filter(&mut self, filter: &CaptureFilter) -> Result<()> {
-        self.bpf_prog = None;
         let Some(prog) = compile_simple_bpf(filter, self.link_type) else {
             return Ok(());
         };
         for dev in &self.devices {
             attach_biocsetf(dev.file.as_raw_fd(), &prog)?;
         }
-        self.bpf_prog = Some(prog);
         Ok(())
     }
 }
@@ -136,7 +132,6 @@ fn attach_biocsetf(fd: i32, prog: &[SockFilter]) -> Result<()> {
     if rc < 0 {
         return Err(io::Error::last_os_error()).context("BIOCSETF");
     }
-    let _ = &insns; // keep alive across ioctl
     Ok(())
 }
 
@@ -189,7 +184,8 @@ fn open_bpf(iface: &str, snaplen: i32, promiscuous: bool) -> Result<BpfDev> {
         let yes: c_uint = 1;
         let _ = ioctl(fd, BIOCIMMEDIATE, &yes);
         if promiscuous {
-            let _ = ioctl(fd, BIOCPROMISC, std::ptr::null::<c_void>());
+            // BIOCPROMISC is `c_uint` in libc; ioctl's request is `c_ulong` on Darwin.
+            let _ = ioctl(fd, BIOCPROMISC as c_ulong, std::ptr::null::<c_void>());
         }
         let _ = BIOCVERSION; // silence unused on some targets
     }
@@ -222,12 +218,14 @@ fn open_bpf(iface: &str, snaplen: i32, promiscuous: bool) -> Result<BpfDev> {
 
 impl LiveCapture for MacCapture {
     fn next_packet(&mut self) -> Result<Option<CapturePacket>> {
-        if let Some(dev) = self.devices.get_mut(self.rr % self.devices.len()) {
-            if let Some(p) = dev.pending.pop() {
-                return Ok(Some(p));
-            }
-        }
         let n = self.devices.len();
+        if n == 0 {
+            return Ok(None);
+        }
+        let idx = self.rr % n;
+        if let Some(p) = self.devices[idx].pending.pop() {
+            return Ok(Some(p));
+        }
         for _ in 0..n {
             let idx = self.rr % n;
             self.rr += 1;

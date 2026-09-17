@@ -98,8 +98,10 @@ pub fn open_live_filtered(
     }
     #[cfg(target_os = "macos")]
     {
-        let _ = filter;
-        let c = crate::capture::macos::MacCapture::open(name, snaplen, promiscuous)?;
+        let mut c = crate::capture::macos::MacCapture::open(name, snaplen, promiscuous)?;
+        if let Some(f) = filter {
+            c.set_filter(f)?;
+        }
         Ok(CaptureHandle { inner: Box::new(c) })
     }
     #[cfg(windows)]
@@ -148,7 +150,6 @@ fn parse_rpcap_target(name: &str) -> Option<RpcapTarget> {
 
 #[cfg(windows)]
 fn capture_filter_to_pcap(filter: &CaptureFilter) -> Option<String> {
-    use std::net::IpAddr;
     match filter {
         CaptureFilter::True => None,
         CaptureFilter::Proto(p) => Some((*p).to_string()),

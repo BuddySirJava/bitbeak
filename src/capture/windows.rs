@@ -26,16 +26,16 @@ struct PcapIf {
 
 #[repr(C)]
 struct PcapPkthdr {
-    ts_sec: libc_time,
-    ts_usec: libc_time,
+    ts_sec: TimevalField,
+    ts_usec: TimevalField,
     caplen: u32,
     len: u32,
 }
 
 #[cfg(target_pointer_width = "64")]
-type libc_time = i64;
+type TimevalField = i64;
 #[cfg(not(target_pointer_width = "64"))]
-type libc_time = i32;
+type TimevalField = i32;
 
 #[repr(C)]
 struct BpfProgram {
@@ -43,52 +43,72 @@ struct BpfProgram {
     bf_insns: *mut std::ffi::c_void,
 }
 
+type PcapFindAllDevs = unsafe extern "C" fn(*mut PcapIfT, *mut i8) -> i32;
+type PcapFreeAllDevs = unsafe extern "C" fn(PcapIfT);
+type PcapOpenLive = unsafe extern "C" fn(*const i8, i32, i32, i32, *mut i8) -> PcapT;
+type PcapNextEx = unsafe extern "C" fn(PcapT, *mut *mut PcapPkthdr, *mut *const u8) -> i32;
+type PcapClose = unsafe extern "C" fn(PcapT);
+type PcapSendPacket = unsafe extern "C" fn(PcapT, *const u8, i32) -> i32;
+type PcapCompile = unsafe extern "C" fn(PcapT, *mut BpfProgram, *const i8, i32, u32) -> i32;
+type PcapSetFilter = unsafe extern "C" fn(PcapT, *mut BpfProgram) -> i32;
+type PcapFreeCode = unsafe extern "C" fn(*mut BpfProgram);
+
 struct Wpcap {
+    findalldevs: Symbol<'static, PcapFindAllDevs>,
+    freealldevs: Symbol<'static, PcapFreeAllDevs>,
+    open_live: Symbol<'static, PcapOpenLive>,
+    next_ex: Symbol<'static, PcapNextEx>,
+    close: Symbol<'static, PcapClose>,
+    sendpacket: Symbol<'static, PcapSendPacket>,
+    compile: Symbol<'static, PcapCompile>,
+    setfilter: Symbol<'static, PcapSetFilter>,
+    freecode: Symbol<'static, PcapFreeCode>,
+    // Dropped last so the `'static` symbols above stay valid.
     _lib: Library,
-    findalldevs: Symbol<'static, unsafe extern "C" fn(*mut PcapIfT, *mut i8) -> i32>,
-    freealldevs: Symbol<'static, unsafe extern "C" fn(PcapIfT)>,
-    open_live: Symbol<'static, unsafe extern "C" fn(*const i8, i32, i32, i32, *mut i8) -> PcapT>,
-    next_ex:
-        Symbol<'static, unsafe extern "C" fn(PcapT, *mut *mut PcapPkthdr, *mut *const u8) -> i32>,
-    close: Symbol<'static, unsafe extern "C" fn(PcapT)>,
-    sendpacket: Symbol<'static, unsafe extern "C" fn(PcapT, *const u8, i32) -> i32>,
-    compile:
-        Symbol<'static, unsafe extern "C" fn(PcapT, *mut BpfProgram, *const i8, i32, u32) -> i32>,
-    setfilter: Symbol<'static, unsafe extern "C" fn(PcapT, *mut BpfProgram) -> i32>,
-    freecode: Symbol<'static, unsafe extern "C" fn(*mut BpfProgram)>,
 }
 
-// SAFETY: we only call from one capture thread.
+// SAFETY: Npcap handles and function pointers are used from a single capture thread.
 unsafe impl Send for Wpcap {}
 
+/// Rebind a `libloading` symbol to `'static`.
+///
+/// # Safety
+///
+/// The `Library` that produced `sym` must outlive the returned symbol.
+unsafe fn symbol_static<T>(sym: Symbol<'_, T>) -> Symbol<'static, T> {
+    std::mem::transmute::<Symbol<'_, T>, Symbol<'static, T>>(sym)
+}
+
 fn load_wpcap() -> Result<Wpcap> {
+    // SAFETY: loading Npcap by well-known DLL path; we only call exported pcap_* symbols.
     let lib = unsafe { Library::new("wpcap.dll") }
         .or_else(|_| unsafe { Library::new("C:\\Windows\\System32\\Npcap\\wpcap.dll") })
         .context("load wpcap.dll")?;
 
     unsafe {
-        let findalldevs = lib.get(b"pcap_findalldevs\0")?;
-        let freealldevs = lib.get(b"pcap_freealldevs\0")?;
-        let open_live = lib.get(b"pcap_open_live\0")?;
-        let next_ex = lib.get(b"pcap_next_ex\0")?;
-        let close = lib.get(b"pcap_close\0")?;
-        let sendpacket = lib.get(b"pcap_sendpacket\0")?;
-        let compile = lib.get(b"pcap_compile\0")?;
-        let setfilter = lib.get(b"pcap_setfilter\0")?;
-        let freecode = lib.get(b"pcap_freecode\0")?;
-        let w = Wpcap {
-            findalldevs: std::mem::transmute(findalldevs),
-            freealldevs: std::mem::transmute(freealldevs),
-            open_live: std::mem::transmute(open_live),
-            next_ex: std::mem::transmute(next_ex),
-            close: std::mem::transmute(close),
-            sendpacket: std::mem::transmute(sendpacket),
-            compile: std::mem::transmute(compile),
-            setfilter: std::mem::transmute(setfilter),
-            freecode: std::mem::transmute(freecode),
+        let findalldevs: Symbol<PcapFindAllDevs> = lib.get(b"pcap_findalldevs\0")?;
+        let freealldevs: Symbol<PcapFreeAllDevs> = lib.get(b"pcap_freealldevs\0")?;
+        let open_live: Symbol<PcapOpenLive> = lib.get(b"pcap_open_live\0")?;
+        let next_ex: Symbol<PcapNextEx> = lib.get(b"pcap_next_ex\0")?;
+        let close: Symbol<PcapClose> = lib.get(b"pcap_close\0")?;
+        let sendpacket: Symbol<PcapSendPacket> = lib.get(b"pcap_sendpacket\0")?;
+        let compile: Symbol<PcapCompile> = lib.get(b"pcap_compile\0")?;
+        let setfilter: Symbol<PcapSetFilter> = lib.get(b"pcap_setfilter\0")?;
+        let freecode: Symbol<PcapFreeCode> = lib.get(b"pcap_freecode\0")?;
+        // SAFETY: `_lib` is stored in the same struct and dropped last, so these
+        // symbols remain valid for the lifetime of `Wpcap`.
+        Ok(Wpcap {
+            findalldevs: symbol_static(findalldevs),
+            freealldevs: symbol_static(freealldevs),
+            open_live: symbol_static(open_live),
+            next_ex: symbol_static(next_ex),
+            close: symbol_static(close),
+            sendpacket: symbol_static(sendpacket),
+            compile: symbol_static(compile),
+            setfilter: symbol_static(setfilter),
+            freecode: symbol_static(freecode),
             _lib: lib,
-        };
-        Ok(w)
+        })
     }
 }
 
@@ -155,6 +175,9 @@ struct WinHandle {
     bpf: Option<BpfProgram>,
 }
 
+// SAFETY: each handle is owned by `WinCapture` and used from one capture thread.
+unsafe impl Send for WinHandle {}
+
 pub struct WinCapture {
     wpcap: Wpcap,
     handles: Vec<WinHandle>,
@@ -201,10 +224,8 @@ impl WinCapture {
                 name: n.clone(),
                 bpf: None,
             };
-            if let Some(f) = filter {
-                if !f.is_empty() {
-                    apply_pcap_filter(&wpcap, &mut wh, f)?;
-                }
+            if let Some(f) = filter.filter(|s| !s.is_empty()) {
+                apply_pcap_filter(&wpcap, &mut wh, f)?;
             }
             handles.push(wh);
         }
@@ -298,9 +319,4 @@ impl LiveCapture for WinCapture {
     fn link_type(&self) -> LinkType {
         LinkType::Ethernet
     }
-}
-
-// Minimal libc time types without depending on libc on Windows.
-mod libc {
-    #![allow(dead_code)]
 }

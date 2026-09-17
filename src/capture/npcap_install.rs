@@ -1,8 +1,7 @@
 //! Download and launch the official Npcap installer (Windows).
 
 use std::fs;
-use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{bail, Context, Result};
@@ -16,9 +15,13 @@ pub const NPCAP_SHA256: &str = "5bdc6411d5e39979a93c2ff883f902ed5ed397c0dbf5a1a3
 
 pub fn ensure_npcap() -> Result<()> {
     // If already loadable, done
-    if libloading::Library::new("wpcap.dll").is_ok()
-        || libloading::Library::new("C:\\Windows\\System32\\Npcap\\wpcap.dll").is_ok()
-    {
+    // SAFETY: probing well-known Npcap DLL names; we only check whether the
+    // library maps, then drop the handle immediately.
+    let already_loaded = unsafe {
+        libloading::Library::new("wpcap.dll").is_ok()
+            || libloading::Library::new("C:\\Windows\\System32\\Npcap\\wpcap.dll").is_ok()
+    };
+    if already_loaded {
         return Ok(());
     }
 
@@ -44,7 +47,7 @@ pub fn ensure_npcap() -> Result<()> {
     Ok(())
 }
 
-fn download_installer(path: &PathBuf) -> Result<()> {
+fn download_installer(path: &Path) -> Result<()> {
     // Use ureq-less approach: std + PowerShell on Windows for HTTPS without extra deps,
     // or curl. Prefer PowerShell Invoke-WebRequest for reliability on Windows.
     let status = Command::new("powershell")
@@ -65,11 +68,9 @@ fn download_installer(path: &PathBuf) -> Result<()> {
     Ok(())
 }
 
-fn verify_sha256(path: &PathBuf) -> Result<()> {
+fn verify_sha256(path: &Path) -> Result<()> {
     let data = fs::read(path).context("read installer")?;
-    let mut hasher = Sha256::new();
-    hasher.write_all(&data)?;
-    let hash = format!("{:x}", hasher.finalize());
+    let hash = format!("{:x}", Sha256::digest(data));
     let expected = std::env::var("BITBEAK_NPCAP_HASH").unwrap_or_else(|_| NPCAP_SHA256.to_string());
     if hash != expected {
         if std::env::var_os("BITBEAK_SKIP_NPCAP_HASH").is_some() {
