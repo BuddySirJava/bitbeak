@@ -1,0 +1,93 @@
+[package]
+name = "bitbeak"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+description = "Interactive terminal inspector and full-suite network testing TUI"
+license = "AGPL-3.0-or-later"
+readme = "README.md"
+keywords = ["tui", "network", "websocket", "tcp", "debugger", "pcap"]
+categories = ["command-line-utilities", "network-programming"]
+repository = "https://github.com/bitbeak/bitbeak"
+
+[[bin]]
+name = "bitbeak"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+aws-lc-rs = "1"
+base64 = "0.23"
+bytes = "1"
+clap = { version = "4", features = ["derive"] }
+crc32fast = "1"
+crossterm = { version = "0.28", features = ["event-stream"] }
+dirs = "7"
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+hickory-proto = "0.24"
+hickory-resolver = "0.24"
+hpack = "0.3"
+http-body-util = "0.1"
+httparse = "1"
+hyper = { version = "1", features = ["client", "http1", "http2", "server"] }
+hyper-rustls = { version = "0.27", default-features = false, features = ["aws-lc-rs", "http1", "http2", "tls12", "webpki-roots"] }
+hyper-util = { version = "0.1", features = ["client-legacy", "http1", "http2", "tokio"] }
+maxminddb = "0.24"
+pcap-file = "2"
+ratatui = "0.29"
+regex = "1"
+rhai = { version = "1", default-features = false, features = ["std", "sync"] }
+rmpv = "1"
+rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs", "std", "tls12"] }
+rustls-pki-types = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+urlencoding = "2"
+sha2 = "0.10"
+surge-ping = "0.8"
+thiserror = "2"
+tls-parser = "0.12"
+tokio = { version = "1", features = ["full"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["aws-lc-rs", "tls12"] }
+tokio-tungstenite = { version = "0.30", features = ["rustls-tls-webpki-roots"] }
+tokio-util = { version = "0.7", features = ["codec"] }
+toml = "0.8"
+tui-textarea = "0.7"
+unicode-width = "0.2"
+webpki-roots = "1"
+x509-parser = "0.16"
+prost = "0.14.4"
+prost-types = "0.14.4"
+prost-reflect = { version = "0.16.5", features = ["serde"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+libloading = "0.8"
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Threading",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+# Keep transitive crates on Rust 1.85-compatible versions (Debian rustc).
+time = "=0.3.36"
+idna_adapter = "=1.2.0"
+instability = "=0.3.3"
+
+[dev-dependencies]
+tempfile = "3"
+tokio-test = "0.4"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[profile.dev.package."*"]
+opt-level = 3

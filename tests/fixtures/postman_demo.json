@@ -1,0 +1,21 @@
+{
+  "info": {
+    "name": "BitBeakDemo",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "Users",
+      "item": [
+        {
+          "name": "List",
+          "request": {
+            "method": "GET",
+            "header": [{"key": "Accept", "value": "application/json"}],
+            "url": "{{baseUrl}}/users"
+          }
+        }
+      ]
+    }
+  ]
+}

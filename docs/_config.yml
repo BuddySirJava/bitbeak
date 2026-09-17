@@ -1,0 +1,8 @@
+title: BitBeak
+description: Interactive terminal inspector and full-suite network testing TUI
+remote_theme: pages-themes/minimal@v0.2.0
+plugins:
+  - jekyll-remote-theme
+show_downloads: false
+github:
+  repository_url: https://github.com/bitbeak/bitbeak
