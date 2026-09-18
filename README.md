@@ -1,46 +1,99 @@
-# BitBeak
+<div align="center">
 
-<p align="center">
-  <img src="BitBeak.svg" alt="BitBeak mascot" width="160" height="160" />
-</p>
+<img src="BitBeak.svg" alt="BitBeak mascot" width="160" height="160" />
+
+# BitBeak
 
 **Interactive terminal inspector and full-suite network testing TUI.**
 
-## Features
+[![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg?style=flat-square)](LICENSE)
+[![Platform](https://img.shields.io/badge/Platform-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey.svg?style=flat-square)](#platform-support)
+[![Rust](https://img.shields.io/badge/Rust-1.85%2B-orange.svg?style=flat-square&logo=rust)](https://www.rust-lang.org)
+[![CI](https://img.shields.io/github/actions/workflow/status/BuddySirJava/bitbeak/ci.yml?branch=main&style=flat-square)](https://github.com/BuddySirJava/bitbeak/actions)
 
-- **Stream sessions:** TCP, UDP, UNIX, WebSocket (`ws`/`wss`), TLS (`tls://`)
-- **HTTP/HTTPS client:** HTTP/1.1 + HTTP/2, timing waterfall, auth (Bearer/Basic/API key/OAuth2), cookies, forms / GraphQL, unary gRPC, Rhai pre-scripts, history
-- **Mock HTTP server** with live route editor + disk persistence
-- **Collections:** `{{var}}` env, Postman/OpenAPI import, curl/Rust codegen
-- **Multi-client listen** and **TCP proxy/tap**
-- **Diagnose:** DNS, TCP/TLS probe, ICMP (TCP fallback)
-- **Capture:** live sniff (Linux AF_PACKET + TPACKET_V3, macOS BPF, Windows Npcap), pcap/pcapng, protocol tree, capture + display filters (Wireshark subset), follow streams, TLS/QUIC decrypt helpers, rpcap, optional GeoIP/manuf
-- **Bench**, **fuzz**, **pcap export** · btop-style UX
+[Installation](#installation) · [Quick start](#quick-start) · [Features](#key-features) · [Docs](docs/index.md)
 
-## Platforms
+</div>
 
-| OS | Live capture | Notes |
-| --- | --- | --- |
-| Linux | AF_PACKET (+ TPACKET_V3 negotiate) | Needs `CAP_NET_RAW` |
-| macOS | BPF (`/dev/bpf*`) + `BIOCSETF` when filter compiles | Needs root or BPF group |
-| Windows | Npcap (`wpcap.dll`) | Official installer on first live capture |
+---
+
+HTTP client, packet capture, stream inspector, mock server, proxy tap, and DNS/ping/TLS probes in one keyboard-driven binary.
+
+## Highlights
+
+* **Keyboard-driven TUI** — multi-tab workspace, F-key shortcuts, and a `:` command palette (btop-style).
+* **HTTP / API workbench** — HTTP/1.1 and HTTP/2, GraphQL, unary gRPC, auth, cookies, history, and a timing waterfall.
+* **Live capture** — Linux `AF_PACKET` (TPACKET_V3 when the kernel supports it), macOS BPF, Windows Npcap.
+* **TLS / QUIC helpers** — dissect application data when an NSS-style `SSLKEYLOGFILE` is available.
+* **Mocks, listen, and proxy** — in-process HTTP mock with a live route editor, multi-client listen, and TCP tap.
+
+## Key Features
+
+* **Stream sessions**
+  * TCP, UDP, UNIX domain sockets, TLS (`tls://`), WebSocket (`ws://`, `wss://`).
+  * Framing: none, newline, or length-prefixed. Hex composer, replay, fuzz, optional pcap export.
+* **HTTP & APIs**
+  * HTTP/1.1 and HTTP/2 (ALPN), urlencoded / multipart forms, GraphQL, unary gRPC (optional protobuf descriptors).
+  * Auth: Bearer, Basic, API key (header or query), OAuth2 authorization-code loopback.
+  * Rhai pre-request scripts, cookie jar, request history, sequential bench (`F7`).
+  * Timing waterfall: DNS, TCP handshake, TLS, TTFB.
+* **Capture & analysis**
+  * Live sniff, `pcap` / `pcapng` open/save, remote capture via `rpcap`.
+  * Capture filters (tcpdump subset) and display filters (Wireshark subset).
+  * Protocol tree, follow TCP/UDP/HTTP, reassembly, TLS 1.2/1.3 and QUIC decrypt helpers.
+  * Optional GeoIP (`GeoLite2-City.mmdb`) and Wireshark-style `manuf` OUI names.
+* **Diagnostics, mocks & tooling**
+  * Mock HTTP server with editable routes persisted under `~/.config/bitbeak/mocks/`.
+  * Multi-client listen and bidirectional TCP proxy / tap (`--tls-intercept` for local debug).
+  * Diagnose: `dns://`, `ping://` (ICMP with TCP fallback), `tcp://`, `tls://`, `trace://`.
+* **Collections**
+  * Named requests and environments with `{{var}}` substitution.
+  * Import Postman v2.1 and OpenAPI 3; generate `curl` or Rust stubs under `./bitbeak-out/`.
+
+## Platform Support
+
+| Operating System | Packet engine | Privilege requirements |
+| :--- | :--- | :--- |
+| **Linux** | `AF_PACKET` (+ TPACKET_V3 when available) | `CAP_NET_RAW` (or root). Example: `sudo setcap cap_net_raw+ep ./target/release/bitbeak` |
+| **macOS** | BPF (`/dev/bpf*`); `BIOCSETF` when a filter compiles | Root or membership in the BPF group |
+| **Windows** | Npcap (`wpcap.dll`) | [Npcap](https://npcap.com/) installed; BitBeak can launch the official installer on first live capture |
+
+## Installation
+
+Rust **1.85+**. On Linux, also install `cmake`, `clang`, and `pkg-config` (needed by `aws-lc-rs`).
+
+### From source
+
+```bash
+git clone https://github.com/BuddySirJava/bitbeak.git
+cd bitbeak
+cargo build --release
+./target/release/bitbeak --help
+```
+
+Install into `~/.cargo/bin`:
+
+```bash
+cargo install --path .
+```
+
+Release binaries for Linux (gnu/musl), macOS, and Windows are built from git tags (`v*`) via GitHub Actions.
 
 ## Quick start
 
 ```bash
-cargo build --release
-bitbeak --help
-
 bitbeak https://example.com/
-bitbeak --import ./collection.postman_collection.json
+bitbeak --import ./tests/fixtures/postman_demo.json
 bitbeak --codegen demo --codegen-lang curl
 bitbeak --capture any
 bitbeak --open ./trace.pcapng --keylog "$SSLKEYLOGFILE"
 ```
 
-Full guides: **[Documentation](docs/index.md)** — [install](docs/install.md), [sessions](docs/sessions.md), [HTTP](docs/http.md), [capture](docs/capture.md), [filters](docs/filters.md), [collections](docs/collections.md), [palette](docs/palette.md).
+`--import` and `--codegen` exit after completing (no TUI).
 
-Press **F1** in the TUI for help. Footer labels (`F1`–`F12`) are the source of truth.
+Press **F1** in the TUI for help. Footer labels (`F1`–`F12`) are the source of truth for shortcuts.
+
+Full guides: **[Documentation](docs/index.md)** — [install](docs/install.md), [sessions](docs/sessions.md), [HTTP](docs/http.md), [capture](docs/capture.md), [filters](docs/filters.md), [collections](docs/collections.md), [palette](docs/palette.md).
 
 ## License
 
