@@ -154,7 +154,7 @@ fn open_bpf(iface: &str, snaplen: i32, promiscuous: bool) -> Result<BpfDev> {
         }
     }
     let file = file.ok_or_else(|| {
-        last.map(|e| anyhow::Error::new(e))
+        last.map(anyhow::Error::new)
             .unwrap_or_else(|| anyhow::anyhow!("no /dev/bpf* available — need root or BPF group"))
     })?;
 

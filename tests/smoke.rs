@@ -10,7 +10,9 @@ use bitbeak::session::SessionView;
 use bitbeak::transport::{channels, IoCommand, IoEvent};
 use bytes::{Bytes, BytesMut};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, UnixListener};
+use tokio::net::TcpListener;
+#[cfg(unix)]
+use tokio::net::UnixListener;
 use tokio_util::codec::{Decoder, Encoder};
 
 #[cfg(unix)]
