@@ -20,6 +20,7 @@ pub enum HitTarget {
     QuitYes,
     QuitNo,
     NewKind(usize),
+    CollectionRow(usize),
     OverlayDismiss,
 }
 

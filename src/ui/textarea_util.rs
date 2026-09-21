@@ -50,3 +50,8 @@ pub fn style_unfocused(ta: &mut TextArea<'_>) {
 pub fn input(ta: &mut TextArea<'_>, key: KeyEvent) {
     ta.input(key);
 }
+
+pub fn set_placeholder(ta: &mut TextArea<'_>, text: &str) {
+    ta.set_placeholder_text(text);
+    ta.set_placeholder_style(theme::dim());
+}

@@ -228,6 +228,10 @@ mod tests {
             name: "index.html".into(),
             content_type: "text/html".into(),
             data: Bytes::from_static(b"<html/>"),
+            is_request: false,
+            method: String::new(),
+            url: String::new(),
+            headers: Vec::new(),
         }];
         export_http_objects(&objs, dir.path()).unwrap();
         let entries: Vec<_> = fs::read_dir(dir.path()).unwrap().collect();

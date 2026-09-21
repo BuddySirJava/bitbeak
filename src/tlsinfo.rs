@@ -28,7 +28,7 @@ pub struct CertSummary {
 /// Perform a TLS handshake and collect certificate / cipher details.
 pub async fn probe_tls(host: &str, port: u16) -> anyhow::Result<TlsInfo> {
     let start = std::time::Instant::now();
-    let addr = format!("{host}:{port}");
+    let addr = crate::cli::join_host_port(host, port);
     let stream = TcpStream::connect(&addr).await?;
 
     let mut root = rustls::RootCertStore::empty();

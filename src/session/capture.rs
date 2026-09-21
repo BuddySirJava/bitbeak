@@ -49,6 +49,10 @@ pub struct CaptureSession {
     pub ring: Option<DiskRing>,
     pub follow_view: Option<FollowResult>,
     pub marked: Vec<u64>,
+    /// Last open/start error (privilege, device missing, …).
+    pub last_error: Option<String>,
+    /// Whether the active capture filter is attached as kernel BPF.
+    pub filter_kernel_bpf: bool,
     packet_rx: Option<Receiver<PacketRecord>>,
     stop_tx: Option<Sender<()>>,
     join: Option<JoinHandle<()>>,
@@ -82,6 +86,8 @@ impl CaptureSession {
             ring: None,
             follow_view: None,
             marked: Vec::new(),
+            last_error: None,
+            filter_kernel_bpf: true,
             packet_rx: None,
             stop_tx: None,
             join: None,
@@ -91,20 +97,26 @@ impl CaptureSession {
 
     pub fn open_file(path: &std::path::Path, max_packets: usize) -> Result<Self> {
         let opened = file_io::open_capture_file(path)?;
+        let file_count = opened.packets.len();
         let mut s = Self::new_live(path.display().to_string().as_str(), max_packets);
         s.source = CaptureSource::File;
         s.status = ConnStatus::Connected;
-        s.status_msg = format!(
-            "opened {} packets from {}",
-            opened.packets.len(),
-            path.display()
-        );
         for (data, link, orig, wall) in opened.packets {
             let id = s.push_dissected(data, link, path.display().to_string(), orig, wall);
             if let Some(pkt) = s.store.get_by_id(id).cloned() {
                 s.stats.ingest(&pkt);
             }
         }
+        let kept = s.store.len();
+        let dropped = s.store.dropped;
+        s.status_msg = if dropped > 0 {
+            format!(
+                "FILE · showing {kept}/{file_count} (ring max {max_packets}; oldest dropped) · {}",
+                path.display()
+            )
+        } else {
+            format!("FILE · {kept} packets · {}", path.display())
+        };
         if !s.store.is_empty() {
             s.selected = s.store.len() - 1;
         }
@@ -123,6 +135,12 @@ impl CaptureSession {
     }
 
     pub fn set_capture_filter(&mut self, q: &str) -> Result<(), String> {
+        if self.source == CaptureSource::File {
+            return Err(
+                "capture filter applies to live sniff only — use F8 display filter on files"
+                    .into(),
+            );
+        }
         match parse_capture_filter(q) {
             Ok(_) => {
                 self.capture_filter_str = q.to_string();
@@ -254,7 +272,16 @@ impl CaptureSession {
         let iface = self.title_iface.clone();
         let cap_filter =
             parse_capture_filter(&self.capture_filter_str).unwrap_or(CaptureFilter::True);
-        let handle = backend::open_live_filtered(&iface, 65535, true, Some(&cap_filter))?;
+        self.filter_kernel_bpf = cap_filter.is_kernel_simple();
+        let handle = match backend::open_live_filtered(&iface, 65535, true, Some(&cap_filter)) {
+            Ok(h) => h,
+            Err(e) => {
+                self.last_error = Some(e.to_string());
+                self.status = ConnStatus::Error;
+                self.status_msg = format!("{e:#} · {}", backend::capture_hint());
+                return Err(e);
+            }
+        };
         let (tx, rx) = mpsc::sync_channel::<PacketRecord>(4096);
         let (stop_tx, stop_rx) = mpsc::channel::<()>();
         let (inj_tx, inj_rx) = mpsc::channel::<Bytes>();
@@ -269,8 +296,16 @@ impl CaptureSession {
         self.inject_tx = Some(inj_tx);
         self.join = Some(join);
         self.capturing = true;
+        self.last_error = None;
         self.status = ConnStatus::Connected;
-        self.status_msg = format!("capturing on {iface}");
+        let filt = if self.capture_filter_str.is_empty() {
+            "none".into()
+        } else if self.filter_kernel_bpf {
+            format!("{} (kernel BPF)", self.capture_filter_str)
+        } else {
+            format!("{} (userspace)", self.capture_filter_str)
+        };
+        self.status_msg = format!("capturing on {iface} · filter {filt}");
         Ok(())
     }
 
@@ -311,28 +346,37 @@ impl CaptureSession {
         Ok(())
     }
 
-    pub fn follow_selected_tcp(&mut self) {
+    pub fn follow_selected_tcp(&mut self) -> bool {
         let Some(sel) = self.visible_packet().cloned() else {
-            return;
+            return false;
         };
         let all: Vec<_> = self.store.all();
-        self.follow_view = Some(follow_tcp(&all, &sel));
+        let mut r = follow_tcp(&all, &sel);
+        r.label.push_str(" · snapshot (re-run to refresh)");
+        self.follow_view = Some(r);
+        true
     }
 
-    pub fn follow_selected_udp(&mut self) {
+    pub fn follow_selected_udp(&mut self) -> bool {
         let Some(sel) = self.visible_packet().cloned() else {
-            return;
+            return false;
         };
         let all: Vec<_> = self.store.all();
-        self.follow_view = Some(follow_udp(&all, &sel));
+        let mut r = follow_udp(&all, &sel);
+        r.label.push_str(" · snapshot (re-run to refresh)");
+        self.follow_view = Some(r);
+        true
     }
 
-    pub fn follow_selected_http(&mut self) {
+    pub fn follow_selected_http(&mut self) -> bool {
         let Some(sel) = self.visible_packet().cloned() else {
-            return;
+            return false;
         };
         let all: Vec<_> = self.store.all();
-        self.follow_view = Some(follow_http(&all, &sel));
+        let mut r = follow_http(&all, &sel);
+        r.label.push_str(" · snapshot (re-run to refresh)");
+        self.follow_view = Some(r);
+        true
     }
 
     pub fn save_all(&self, path: &std::path::Path) -> Result<()> {

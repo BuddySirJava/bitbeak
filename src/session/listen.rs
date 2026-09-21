@@ -67,6 +67,31 @@ impl ListenSession {
         }
     }
 
+    /// UI tests — no listen socket.
+    pub fn inert(target: Target, framing: FramingConfig, max_frames: usize) -> Self {
+        let (_io_tx, io_rx, cmd_tx, _cmd_rx) = channels();
+        Self {
+            target,
+            framing,
+            status: ConnStatus::Listening,
+            frames: FrameBuffer::new(max_frames),
+            clients: Vec::new(),
+            selected_client: None,
+            selected: 0,
+            follow: true,
+            focus: PaneFocus::Composer,
+            inspect: InspectMode::Hex,
+            composer_mode: ComposerMode::Utf8,
+            composer: textarea_util::multi_line(""),
+            broadcast: false,
+            filter: String::new(),
+            status_msg: "waiting for clients…".into(),
+            cmd_tx,
+            io_rx: Some(io_rx),
+            _handle: None,
+        }
+    }
+
     pub fn take_io_rx(&mut self) -> Option<IoRx> {
         self.io_rx.take()
     }

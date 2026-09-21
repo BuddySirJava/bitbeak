@@ -164,6 +164,52 @@ impl Collection {
             .iter()
             .find(|r| r.name == name || r.name.ends_with(&format!("/{name}")))
     }
+
+    /// Best saved request for a CLI / session URL (exact, then path, then path prefix).
+    pub fn best_request_for_url(&self, url: &str) -> Option<&SavedRequest> {
+        let want = normalize_url(url);
+        if want.is_empty() {
+            return None;
+        }
+        let want_path = path_of(&want);
+        let mut best: Option<(u8, &SavedRequest)> = None;
+        for req in &self.requests {
+            let raw = normalize_url(&req.target);
+            let sub = normalize_url(&self.substitute(&req.target));
+            let score = if sub == want || raw == want {
+                3
+            } else if want_path != "/" && (path_of(&sub) == want_path || path_of(&raw) == want_path)
+            {
+                2
+            } else if path_prefix_match(path_of(&sub), want_path)
+                || path_prefix_match(path_of(&raw), want_path)
+            {
+                1
+            } else {
+                0
+            };
+            if score > best.map(|(s, _)| s).unwrap_or(0) {
+                best = Some((score, req));
+            }
+        }
+        best.map(|(_, r)| r)
+    }
+}
+
+fn normalize_url(s: &str) -> String {
+    s.trim().trim_end_matches('/').to_string()
+}
+
+fn path_of(url: &str) -> &str {
+    let rest = url.split_once("://").map(|(_, r)| r).unwrap_or(url);
+    rest.find('/').map(|i| &rest[i..]).unwrap_or("/")
+}
+
+fn path_prefix_match(saved: &str, want: &str) -> bool {
+    if saved.is_empty() || saved == "/" {
+        return false;
+    }
+    want == saved || want.starts_with(&format!("{saved}/"))
 }
 
 pub fn config_dir() -> PathBuf {
@@ -266,5 +312,44 @@ mod tests {
         assert_eq!(col.active_env.as_deref(), Some("a"));
         col.cycle_env();
         assert_eq!(col.active_env.as_deref(), Some("b"));
+    }
+
+    #[test]
+    fn best_request_for_url_prefers_exact() {
+        let mut col = Collection::new("kestrel");
+        col.environments.push(Environment {
+            name: "production".into(),
+            vars: vec![("baseUrl".into(), "http://127.0.0.1:18081".into())],
+        });
+        col.active_env = Some("production".into());
+        col.requests.push(SavedRequest {
+            name: "List".into(),
+            target: "{{baseUrl}}/v1/customers".into(),
+            ..Default::default()
+        });
+        col.requests.push(SavedRequest {
+            name: "Get order".into(),
+            target: "http://127.0.0.1:18081/v1/orders/ord_8f2c91a4".into(),
+            auth: crate::http::AuthKind::Bearer,
+            auth_token: "tok".into(),
+            ..Default::default()
+        });
+        let hit = col
+            .best_request_for_url("http://127.0.0.1:18081/v1/orders/ord_8f2c91a4")
+            .unwrap();
+        assert_eq!(hit.name, "Get order");
+        let listed = col
+            .best_request_for_url("http://127.0.0.1:18081/v1/customers/")
+            .unwrap();
+        assert_eq!(listed.name, "List");
+        assert!(
+            col.best_request_for_url("http://127.0.0.1:18081/readyz")
+                .is_none(),
+            "unrelated path must not inherit another request"
+        );
+        let nested = col
+            .best_request_for_url("http://127.0.0.1:18081/v1/customers/cus_1")
+            .unwrap();
+        assert_eq!(nested.name, "List");
     }
 }

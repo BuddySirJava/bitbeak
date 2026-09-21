@@ -1,5 +1,6 @@
 //! HTTP/HTTPS client with timing waterfall, auth, forms, redirects.
 
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use anyhow::{Context, Result};
@@ -11,6 +12,8 @@ use hyper::{Method, Request, Uri};
 use hyper_util::client::legacy::Client;
 use hyper_util::rt::TokioExecutor;
 use serde::{Deserialize, Serialize};
+
+use crate::http::timed_connect::{TimedHttpsConnector, TimingCapture};
 
 #[derive(Debug, Clone, Default)]
 pub struct HttpTimings {
@@ -155,7 +158,6 @@ pub fn apply_auth(spec: &mut HttpRequestSpec) {
             }
         }
         AuthKind::OAuth2 => {
-            // Token expected in auth_token after OAuth flow.
             if !spec.auth_token.is_empty() {
                 upsert_header(
                     &mut spec.headers,
@@ -246,6 +248,14 @@ fn chrono_like_id() -> u64 {
         .as_millis() as u64
 }
 
+/// Apply curl-like redirect method changes: 301/302/303 → GET without body.
+pub fn apply_redirect_method(status: u16, method: &mut String, body: &mut Bytes) {
+    if matches!(status, 301..=303) {
+        *method = "GET".into();
+        *body = Bytes::new();
+    }
+}
+
 pub async fn send_request(spec: &HttpRequestSpec) -> Result<HttpResponse> {
     let mut spec = spec.clone();
     apply_auth(&mut spec);
@@ -267,20 +277,10 @@ pub async fn send_request(spec: &HttpRequestSpec) -> Result<HttpResponse> {
     let mut current_body = spec.body.clone();
     let mut hops = 0u8;
 
-    let https = {
-        let b = hyper_rustls::HttpsConnectorBuilder::new()
-            .with_webpki_roots()
-            .https_or_http();
-        match spec.http_version {
-            HttpVersion::Http1 => b.enable_http1().build(),
-            HttpVersion::Http2 => b.enable_http2().build(),
-            HttpVersion::Auto => b.enable_http1().enable_http2().build(),
-        }
-    };
-    let client: Client<_, Full<Bytes>> = Client::builder(TokioExecutor::new()).build(https);
+    let capture = Arc::new(Mutex::new(TimingCapture::default()));
+    let connector = TimedHttpsConnector::new(spec.http_version, capture.clone());
+    let client: Client<_, Full<Bytes>> = Client::builder(TokioExecutor::new()).build(connector);
 
-    let mut timings = HttpTimings::default();
-    let mut tls_info = None;
     let mut last_headers = Vec::new();
     #[allow(unused_assignments)]
     let mut last_status = 0u16;
@@ -291,24 +291,6 @@ pub async fn send_request(spec: &HttpRequestSpec) -> Result<HttpResponse> {
 
     loop {
         let uri: Uri = current_url.parse().context("parse url")?;
-        let host = uri.host().unwrap_or("").to_string();
-        let is_https = uri.scheme_str() == Some("https");
-        let port = uri.port_u16().unwrap_or(if is_https { 443 } else { 80 });
-
-        if hops == 0 {
-            let dns_start = Instant::now();
-            let _ = tokio::net::lookup_host(format!("{host}:{port}")).await;
-            timings.dns_ms = Some(dns_start.elapsed().as_millis() as u64);
-            if is_https {
-                let tls_start = Instant::now();
-                if let Ok(info) = crate::tlsinfo::probe_tls(&host, port).await {
-                    timings.tls_ms = Some(info.handshake_ms);
-                    tls_info = Some(info);
-                } else {
-                    timings.tls_ms = Some(tls_start.elapsed().as_millis() as u64);
-                }
-            }
-        }
 
         let method: Method = current_method.parse().unwrap_or(Method::GET);
         let mut builder = Request::builder().method(method).uri(&uri);
@@ -330,7 +312,8 @@ pub async fn send_request(spec: &HttpRequestSpec) -> Result<HttpResponse> {
         let ttfb_start = Instant::now();
         let resp = client.request(req).await.context("http request")?;
         if hops == 0 {
-            timings.ttfb_ms = Some(ttfb_start.elapsed().as_millis() as u64);
+            let mut g = capture.lock().unwrap_or_else(|e| e.into_inner());
+            g.timings.ttfb_ms = Some(ttfb_start.elapsed().as_millis() as u64);
         }
 
         last_status = resp.status().as_u16();
@@ -374,23 +357,16 @@ pub async fn send_request(spec: &HttpRequestSpec) -> Result<HttpResponse> {
             location: loc.clone(),
         });
         current_url = resolve_location(&current_url, &loc);
-        if last_status == 303 {
-            current_method = "GET".into();
-            current_body = Bytes::new();
-        }
+        apply_redirect_method(last_status, &mut current_method, &mut current_body);
         hops += 1;
         let _ = negotiated;
     }
 
+    let (mut timings, tls_info) = {
+        let g = capture.lock().unwrap_or_else(|e| e.into_inner());
+        (g.timings.clone(), g.tls.clone())
+    };
     timings.total_ms = start.elapsed().as_millis() as u64;
-    if timings.tcp_ms.is_none() {
-        let approx = timings
-            .total_ms
-            .saturating_sub(timings.dns_ms.unwrap_or(0))
-            .saturating_sub(timings.tls_ms.unwrap_or(0))
-            .saturating_sub(timings.ttfb_ms.unwrap_or(0) / 2);
-        timings.tcp_ms = Some(approx.min(timings.total_ms));
-    }
 
     Ok(HttpResponse {
         status: last_status,
@@ -444,6 +420,12 @@ pub fn format_headers(headers: &[(String, String)]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use http_body_util::Full;
+    use hyper::service::service_fn;
+    use hyper::{Response, StatusCode};
+    use hyper_util::rt::TokioIo;
+    use std::convert::Infallible;
+    use tokio::net::TcpListener;
 
     #[test]
     fn parse_headers() {
@@ -479,5 +461,66 @@ mod tests {
         .unwrap();
         assert_eq!(ct.unwrap(), "application/x-www-form-urlencoded");
         assert_eq!(&b[..], b"a=b%20c");
+    }
+
+    #[test]
+    fn redirect_301_becomes_get() {
+        let mut method = "POST".to_string();
+        let mut body = Bytes::from_static(b"payload");
+        apply_redirect_method(301, &mut method, &mut body);
+        assert_eq!(method, "GET");
+        assert!(body.is_empty());
+        method = "POST".into();
+        body = Bytes::from_static(b"x");
+        apply_redirect_method(307, &mut method, &mut body);
+        assert_eq!(method, "POST");
+        assert_eq!(&body[..], b"x");
+    }
+
+    #[tokio::test]
+    async fn follow_301_post_to_get() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            loop {
+                let (stream, _) = listener.accept().await.unwrap();
+                let io = TokioIo::new(stream);
+                tokio::spawn(async move {
+                    let svc = service_fn(|req: Request<hyper::body::Incoming>| async move {
+                        let path = req.uri().path().to_string();
+                        let method = req.method().clone();
+                        if path == "/from" {
+                            Ok::<_, Infallible>(
+                                Response::builder()
+                                    .status(StatusCode::MOVED_PERMANENTLY)
+                                    .header("location", "/to")
+                                    .body(Full::new(Bytes::from_static(b"")))
+                                    .unwrap(),
+                            )
+                        } else {
+                            let body = format!("{} {}", method, path);
+                            Ok(Response::new(Full::new(Bytes::from(body))))
+                        }
+                    });
+                    let _ = hyper::server::conn::http1::Builder::new()
+                        .serve_connection(io, svc)
+                        .await;
+                });
+            }
+        });
+
+        let spec = HttpRequestSpec {
+            method: "POST".into(),
+            url: format!("http://{addr}/from"),
+            body: Bytes::from_static(b"payload"),
+            follow_redirects: true,
+            ..Default::default()
+        };
+        let resp = send_request(&spec).await.unwrap();
+        assert_eq!(resp.status, 200);
+        assert_eq!(&resp.body[..], b"GET /to");
+        assert_eq!(resp.redirect_chain.len(), 1);
+        assert!(resp.timings.dns_ms.is_some());
+        assert!(resp.timings.tcp_ms.is_some());
     }
 }

@@ -22,7 +22,7 @@ pub async fn run_tcp_connect(
     io_tx: IoTx,
     mut cmd_rx: CmdRx,
 ) -> Result<()> {
-    let addr = format!("{host}:{port}");
+    let addr = crate::cli::join_host_port(host, port);
     let stream = TcpStream::connect(&addr)
         .await
         .with_context(|| format!("connect {addr}"))?;
@@ -43,7 +43,7 @@ pub async fn run_tcp_listen(
     io_tx: IoTx,
     mut cmd_rx: CmdRx,
 ) -> Result<()> {
-    let addr = format!("{host}:{port}");
+    let addr = crate::cli::join_host_port(host, port);
     let listener = TcpListener::bind(&addr)
         .await
         .with_context(|| format!("bind {addr}"))?;

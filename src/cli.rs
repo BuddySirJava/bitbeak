@@ -285,6 +285,15 @@ fn split_host_port(rest: &str) -> Result<(String, u16), TargetParseError> {
     Ok((host.to_string(), port))
 }
 
+/// Format host:port, bracketing IPv6 so `::1:443` is not ambiguous.
+pub fn join_host_port(host: &str, port: u16) -> String {
+    if host.contains(':') && !host.starts_with('[') {
+        format!("[{host}]:{port}")
+    } else {
+        format!("{host}:{port}")
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DiagSpec {
     Dns { host: String },
@@ -414,5 +423,12 @@ mod tests {
                 host: "example.com".into()
             }
         );
+    }
+
+    #[test]
+    fn join_host_port_brackets_ipv6() {
+        assert_eq!(join_host_port("127.0.0.1", 80), "127.0.0.1:80");
+        assert_eq!(join_host_port("::1", 443), "[::1]:443");
+        assert_eq!(join_host_port("[::1]", 443), "[::1]:443");
     }
 }

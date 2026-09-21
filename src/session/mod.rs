@@ -4,15 +4,13 @@ mod capture;
 mod diag;
 mod http_session;
 mod listen;
-mod mock;
 mod proxy;
 mod stream;
 
-pub use capture::CaptureSession;
+pub use capture::{CaptureSession, CaptureSource};
 pub use diag::DiagSession;
 pub use http_session::{FormCell, HttpField, HttpSession, ResponseLineKind};
 pub use listen::ListenSession;
-pub use mock::{default_routes, load_routes, MockRoute, MockRouteCell, MockSession};
 pub use proxy::ProxySession;
 pub use stream::StreamSession;
 
@@ -28,7 +26,6 @@ pub enum SessionKind {
     Proxy,
     Diag,
     Capture,
-    Mock,
 }
 
 impl SessionKind {
@@ -40,7 +37,6 @@ impl SessionKind {
             Self::Proxy => "PROXY",
             Self::Diag => "DIAG",
             Self::Capture => "CAPTURE",
-            Self::Mock => "MOCK",
         }
     }
 }

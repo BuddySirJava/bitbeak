@@ -15,6 +15,7 @@ pub mod http;
 pub mod inspect;
 pub mod pcap;
 pub mod session;
+pub mod tls_mitm;
 pub mod tlsinfo;
 pub mod transport;
 pub mod ui;

@@ -7,7 +7,7 @@ title: Sessions
 
 [Docs home](index.md)
 
-BitBeak is a multi-tab workspace. Open a session with **F2** / `[+]`, the command palette (`:`), or a CLI flag.
+BitBeak is a multi-tab workspace. Open a session with **F2** / `[+]`, the command palette (`:`), or a CLI flag. F2 pre-fills a working example URI per kind (Enter opens it); capture-file stays empty with a path placeholder.
 
 ## Session kinds
 
@@ -20,7 +20,6 @@ BitBeak is a multi-tab workspace. Open a session with **F2** / `[+]`, the comman
 | Diagnose | New → Diagnose, or `:` `diag …` | `dns://example.com`, `ping://8.8.8.8`, `tcp://host:443`, `tls://host:443` |
 | Capture (live) | New → Capture, or `--capture` / `:` `capture …` | `eth0`, `en0`, `any` |
 | Open capture file | New → Open file, or `--open` / `:` `open …` | `/path/to/trace.pcapng` |
-| Mock HTTP | New → Mock, or `:` `mock` / `:` `mock tcp://…` | default `tcp://127.0.0.1:18080` |
 
 Paste a bare URI into the palette (`:`) — `http(s)://` opens HTTP; other schemes open Stream.
 
@@ -29,7 +28,7 @@ Paste a bare URI into the palette (`:`) — `http(s)://` opens HTTP; other schem
 - Composer + frame log + inspector (hex / text / JSON / MsgPack, …)
 - Framing: CLI `--framing none|newline|length-prefixed` (prefix size/endian for LP)
 - Hex mode: **Ctrl+M**; escapes `\x00`, `\n`, `\r`, `\t`, `\\`
-- **F6** replay selected frame; **F11** fuzz; **F12** pcap export of session frames when configured
+- **F6** replay selected frame; **F11** / `:` `fuzz` mutate composer once; **F12** pcap export of session frames when configured
 
 ## Listen
 
@@ -40,7 +39,9 @@ Paste a bare URI into the palette (`:`) — `http(s)://` opens HTTP; other schem
 ## Proxy / tap
 
 - Local bind + upstream; traffic appears as proxied flows
-- `--tls-intercept` is for local debug only (CLI)
+- **TUI**: F2 → Proxy → Space/`i` toggles TLS intercept, or `:` `proxy tcp://…|tcp://… --tls-intercept`
+- `--tls-intercept` / MITM (local debug only): terminates TLS with a BitBeak CA under `~/.config/bitbeak/ca/ca.pem`, reconnects upstream with TLS, and reassembles **HTTP/1.1** plaintext into labeled frames (`HTTP GET /…`, status lines). Install that CA in the client trust store (`:` `ca-path`); BitBeak never auto-installs system CAs.
+- **HTTP/2 is not intercepted** (ALPN advertises HTTP/1.1 only). Composer pane injects bytes toward the upstream half of the active splice.
 
 ## Diagnose
 
@@ -49,13 +50,7 @@ Probes without a full stream session:
 - `dns://host` — resolve
 - `ping://host[:port]` — ICMP with TCP fallback where needed
 - `tcp://host:port` / `tls://host:port` — connect / TLS handshake timing
-- `trace://…` — trace-style probe when used
-
-## Mock HTTP
-
-- In-process HTTP server with an editable route table (method, path, body, status, latency)
-- Routes persist under `~/.config/bitbeak/mocks/<bind>.toml`
-- Focus the routes pane with **Tab**; **a** add / **d** delete
+- `trace://host[:port]` — UDP/ICMP traceroute when raw sockets are available (`CAP_NET_RAW` / root); otherwise TCP TTL probes with an explicit privilege hint, then DNS+TCP fallback. Hop table already shown in the diag pane.
 
 ## Capture
 

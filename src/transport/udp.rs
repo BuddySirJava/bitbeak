@@ -8,7 +8,7 @@ use crate::frame::Direction;
 use crate::transport::{CmdRx, IoCommand, IoEvent, IoTx};
 
 pub async fn run_udp_connect(host: &str, port: u16, io_tx: IoTx, mut cmd_rx: CmdRx) -> Result<()> {
-    let addr = format!("{host}:{port}");
+    let addr = crate::cli::join_host_port(host, port);
     let sock = UdpSocket::bind("0.0.0.0:0")
         .await
         .context("bind ephemeral")?;
@@ -55,7 +55,7 @@ pub async fn run_udp_connect(host: &str, port: u16, io_tx: IoTx, mut cmd_rx: Cmd
 }
 
 pub async fn run_udp_listen(host: &str, port: u16, io_tx: IoTx, mut cmd_rx: CmdRx) -> Result<()> {
-    let addr = format!("{host}:{port}");
+    let addr = crate::cli::join_host_port(host, port);
     let sock = UdpSocket::bind(&addr)
         .await
         .with_context(|| format!("bind {addr}"))?;

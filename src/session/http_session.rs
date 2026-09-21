@@ -432,6 +432,27 @@ impl HttpSession {
         self.sync_field_styles();
     }
 
+    /// Load a dissected HTTP request object (from follow-http / replay-http).
+    pub fn load_http_object(&mut self, obj: &crate::dissect::HttpObject) {
+        let method = if obj.method.is_empty() {
+            "GET"
+        } else {
+            obj.method.as_str()
+        };
+        textarea_util::set_text(&mut self.method, method);
+        if !obj.url.is_empty() {
+            textarea_util::set_text(&mut self.url, &obj.url);
+        }
+        textarea_util::set_text(&mut self.headers, &format_headers(&obj.headers));
+        let body = String::from_utf8_lossy(&obj.data);
+        textarea_util::set_text(&mut self.body, &body);
+        self.body_mode = BodyMode::Raw;
+        self.status_msg = format!("loaded from follow: {}", obj.name);
+        self.focus = PaneFocus::Form;
+        self.field = HttpField::Url;
+        self.sync_field_styles();
+    }
+
     pub fn replay_history_at_cursor(&mut self) {
         if let Some(id) = self.history_ids.get(self.history_cursor).cloned() {
             match load_history_entry(&id) {
@@ -481,6 +502,20 @@ impl HttpSession {
             self.grpc_mode = true;
         }
         self.status_msg = format!("loaded {}", req.name);
+        self.sync_field_styles();
+    }
+
+    /// Fill method/headers/auth from a matching collection request; keep `url` if set.
+    pub fn apply_collection(&mut self, col: &Collection) {
+        let url = textarea_util::text_of(&self.url);
+        let Some(req) = col.best_request_for_url(&url) else {
+            return;
+        };
+        self.load_saved(req);
+        if !url.trim().is_empty() {
+            textarea_util::set_text(&mut self.url, url.trim());
+        }
+        self.status_msg = format!("loaded {} · Enter Send", req.name);
         self.sync_field_styles();
     }
 
@@ -671,6 +706,7 @@ impl HttpSession {
         self.status_msg = "sending…".into();
 
         if self.grpc_mode {
+            crate::http::apply_auth(&mut spec);
             let mut message = spec.body.clone();
             if !self.grpc_descriptor_path.is_empty() && !self.grpc_message_type.is_empty() {
                 let json = String::from_utf8_lossy(&spec.body);
@@ -688,10 +724,12 @@ impl HttpSession {
                     }
                 }
             }
+            let authority = authority_from_url(&spec.url);
             let grpc_req = crate::http::grpc::GrpcRequest {
                 url: spec.url.clone(),
                 message,
-                authority: String::new(),
+                authority,
+                headers: spec.headers.clone(),
             };
             match crate::http::grpc::unary_call(&grpc_req).await {
                 Ok(resp) => {
@@ -737,12 +775,8 @@ impl HttpSession {
                         None,
                         Some(format!("grpc {}", resp.grpc_status)),
                     );
-                    self.status_msg = format!(
-                        "grpc-status={} · {} B",
-                        resp.grpc_status,
-                        resp.message.len()
-                    );
-                    self.last_response = Some(HttpResponse {
+                    let body_len = body_preview.len();
+                    let http_resp = HttpResponse {
                         status: resp.grpc_status as u16,
                         headers: resp.headers,
                         body: Bytes::from(body_preview),
@@ -750,7 +784,22 @@ impl HttpSession {
                         tls: None,
                         redirect_chain: Vec::new(),
                         version: "h2".into(),
-                    });
+                    };
+                    let _ = append_history(&spec, &http_resp);
+                    self.reload_history_pane();
+                    self.last_assert = run_tests(&self.tests, &http_resp);
+                    let assert_summary = if self.last_assert.is_empty() {
+                        String::new()
+                    } else {
+                        let pass = self.last_assert.iter().filter(|a| a.passed).count();
+                        let total = self.last_assert.len();
+                        format!(" · tests {pass}/{total}")
+                    };
+                    self.status_msg = format!(
+                        "grpc-status={} · {body_len} B{assert_summary}",
+                        resp.grpc_status
+                    );
+                    self.last_response = Some(http_resp);
                 }
                 Err(e) => {
                     self.status = ConnStatus::Error;
@@ -912,6 +961,26 @@ impl HttpSession {
         for line in format_headers(&resp.headers).lines() {
             lines.push((line.to_string(), ResponseLineKind::Normal));
         }
+        if self.body_mode == BodyMode::GraphQL || resp.body.starts_with(b"{") {
+            if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&resp.body) {
+                if let Some(errs) = v.get("errors").and_then(|e| e.as_array()) {
+                    if !errs.is_empty() {
+                        lines.push((String::new(), ResponseLineKind::Normal));
+                        lines.push((
+                            format!("── GRAPHQL ERRORS ({}) ──", errs.len()),
+                            ResponseLineKind::Section,
+                        ));
+                        for err in errs.iter().take(8) {
+                            let msg = err
+                                .get("message")
+                                .and_then(|m| m.as_str())
+                                .unwrap_or("(error)");
+                            lines.push((format!("  {msg}"), ResponseLineKind::Fail));
+                        }
+                    }
+                }
+            }
+        }
         if let Some(tls) = &resp.tls {
             lines.push((String::new(), ResponseLineKind::Normal));
             lines.push(("── tls ──".into(), ResponseLineKind::Section));
@@ -921,6 +990,14 @@ impl HttpSession {
         }
         lines
     }
+}
+
+fn authority_from_url(url: &str) -> String {
+    let rest = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))
+        .unwrap_or(url);
+    rest.split('/').next().unwrap_or(rest).to_string()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

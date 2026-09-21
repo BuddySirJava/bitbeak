@@ -75,6 +75,7 @@ pub fn draw(frame: &mut Frame, ws: &mut Workspace) -> HitMap {
         | Overlay::Hierarchy
         | Overlay::Expert
         | Overlay::Keylog => draw_capture_overlay(frame, area, ws, &mut hits),
+        Overlay::TestsEdit | Overlay::PreScriptEdit => draw_edit_overlay(frame, area, ws, &mut hits),
     }
 
     ws.hitmap = hits.clone();
@@ -171,204 +172,9 @@ fn draw_body(frame: &mut Frame, area: Rect, ws: &mut Workspace, tick: u64, hits:
             SessionSlot::Proxy(s) => draw_proxy(frame, area, s, tick, hits),
             SessionSlot::Diag(s) => draw_diag(frame, area, s, tick, hits),
             SessionSlot::Capture(s) => draw_capture(frame, area, s, tick, hits),
-            SessionSlot::Mock(s) => draw_mock(frame, area, s, tick, hits),
         },
         _ => {}
     }
-}
-
-fn draw_mock(
-    frame: &mut Frame,
-    area: Rect,
-    s: &mut crate::session::MockSession,
-    tick: u64,
-    hits: &mut HitMap,
-) {
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(1), Constraint::Min(3)])
-        .split(area);
-
-    let routes = s.routes_snapshot();
-    frame.render_widget(
-        Paragraph::new(status_line(
-            &s.bind,
-            s.status,
-            s.frames.len(),
-            &format!(
-                "{} routes · {} · Tab routes · a add · d del",
-                routes.len(),
-                s.status_msg
-            ),
-            tick,
-        )),
-        chunks[0],
-    );
-
-    let mid = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(45), Constraint::Percentage(55)])
-        .split(chunks[1]);
-
-    hits.push(mid[0], HitTarget::Focus(PaneFocus::Log));
-    hits.push(mid[1], HitTarget::Focus(PaneFocus::Form));
-
-    let mut log_lines: Vec<Line> = Vec::new();
-    for f in s.frames.iter().take(30) {
-        log_lines.push(Line::from(Span::styled(
-            format!("{:?} {}", f.direction, String::from_utf8_lossy(&f.payload)),
-            theme::dim(),
-        )));
-    }
-    if log_lines.is_empty() {
-        log_lines.push(Line::from(Span::styled(
-            "  (no requests yet — send HTTP to this bind)",
-            theme::dim(),
-        )));
-    }
-    let log_border = if s.focus == PaneFocus::Log {
-        theme::accent()
-    } else {
-        theme::border()
-    };
-    frame.render_widget(
-        Paragraph::new(log_lines).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(log_border)
-                .title(Span::styled(" REQUEST LOG ", theme::title())),
-        ),
-        mid[0],
-    );
-
-    draw_mock_routes(frame, mid[1], s, hits);
-}
-
-fn draw_mock_routes(
-    frame: &mut Frame,
-    area: Rect,
-    s: &mut crate::session::MockSession,
-    hits: &mut HitMap,
-) {
-    use crate::session::MockRouteCell;
-
-    let routes = s.routes_snapshot();
-    let focused = s.focus == PaneFocus::Form;
-    let border = if focused {
-        theme::accent()
-    } else {
-        theme::border()
-    };
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(border)
-        .title(Span::styled(
-            format!(
-                " ROUTES row {}/{} · a add · d del · Tab cell ",
-                if routes.is_empty() {
-                    0
-                } else {
-                    s.route_row + 1
-                },
-                routes.len()
-            ),
-            theme::title(),
-        ));
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-    hits.push(area, HitTarget::Focus(PaneFocus::Form));
-
-    let rows = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(3),
-            Constraint::Min(2),
-            Constraint::Length(3),
-            Constraint::Min(2),
-        ])
-        .split(inner);
-
-    let cols = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(35), Constraint::Percentage(65)])
-        .split(rows[0]);
-    draw_mini_ta(
-        frame,
-        cols[0],
-        "method",
-        &mut s.route_method_ta,
-        focused && s.route_cell == MockRouteCell::Method,
-    );
-    draw_mini_ta(
-        frame,
-        cols[1],
-        "path",
-        &mut s.route_path_ta,
-        focused && s.route_cell == MockRouteCell::Path,
-    );
-
-    draw_mini_ta(
-        frame,
-        rows[1],
-        "body",
-        &mut s.route_body_ta,
-        focused && s.route_cell == MockRouteCell::Body,
-    );
-
-    let bottom = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
-        .split(rows[2]);
-    draw_mini_ta(
-        frame,
-        bottom[0],
-        "status",
-        &mut s.route_status_ta,
-        focused && s.route_cell == MockRouteCell::Status,
-    );
-    draw_mini_ta(
-        frame,
-        bottom[1],
-        "latency_ms",
-        &mut s.route_latency_ta,
-        focused && s.route_cell == MockRouteCell::Latency,
-    );
-
-    let mut list: Vec<Line> = Vec::new();
-    for (i, r) in routes.iter().enumerate() {
-        let mark = if i == s.route_row { "▸ " } else { "  " };
-        let style = if i == s.route_row && focused {
-            theme::accent()
-        } else {
-            theme::dim()
-        };
-        list.push(Line::from(Span::styled(
-            format!(
-                "{mark}{} {} → {} · {} · {}ms",
-                r.method,
-                r.path,
-                r.status,
-                r.body.chars().take(24).collect::<String>(),
-                r.latency_ms
-            ),
-            style,
-        )));
-    }
-    if list.is_empty() {
-        list.push(Line::from(Span::styled(
-            "  (no routes — press a)",
-            theme::dim(),
-        )));
-    }
-    frame.render_widget(
-        Paragraph::new(list).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(theme::border())
-                .title(Span::styled(" route list ", theme::title())),
-        ),
-        rows[3],
-    );
 }
 
 fn status_line(
@@ -602,11 +408,20 @@ fn draw_proxy(
 ) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(1), Constraint::Min(3)])
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Min(3),
+            Constraint::Length(6),
+        ])
         .split(area);
+    let mitm = if s.tls_intercept {
+        " · MITM/HTTP1.1"
+    } else {
+        ""
+    };
     frame.render_widget(
         Paragraph::new(status_line(
-            &s.target_display(),
+            &format!("{}{mitm}", s.target_display()),
             s.status,
             s.frames.len(),
             &s.status_msg,
@@ -622,6 +437,7 @@ fn draw_proxy(
     let total = s.frames.len();
     hits.push(mid[0], HitTarget::Focus(PaneFocus::Log));
     hits.push(mid[1], HitTarget::Focus(PaneFocus::Inspector));
+    hits.push(chunks[2], HitTarget::Focus(PaneFocus::Composer));
     draw_frame_log(
         frame,
         mid[0],
@@ -632,7 +448,11 @@ fn draw_proxy(
         s.follow,
         s.focus == PaneFocus::Log,
         " PROXY FLOWS ",
-        "waiting for proxied traffic…",
+        if s.tls_intercept {
+            "waiting for HTTPS · install CA (: ca-path) · HTTP/1.1 only"
+        } else {
+            "waiting for traffic · Tab → composer · F6 inject"
+        },
         hits,
     );
     draw_inspector(
@@ -642,6 +462,17 @@ fn draw_proxy(
         s.inspect,
         s.focus == PaneFocus::Inspector,
         hits,
+    );
+    s.sync_composer_style();
+    paint_textarea(
+        frame,
+        chunks[2],
+        &mut s.composer,
+        s.focus == PaneFocus::Composer,
+        Some(Line::from(Span::styled(
+            " COMPOSER inject→upstream (Enter send) ",
+            theme::title(),
+        ))),
     );
 }
 
@@ -666,10 +497,20 @@ fn draw_http(
     } else {
         "cookies:off"
     };
+    let tests_badge = if s.tests.is_empty() {
+        String::new()
+    } else {
+        format!(" · tests:{}", s.tests.len())
+    };
+    let script_badge = if s.pre_script.trim().is_empty() {
+        ""
+    } else {
+        " · script:on"
+    };
     frame.render_widget(
         Paragraph::new(status_line(
             &format!(
-                "{} · {} · {:?} · {cookie}",
+                "{} · {} · {:?} · {cookie}{tests_badge}{script_badge}",
                 textarea_util::text_of(&s.url),
                 s.auth_label(),
                 s.body_mode
@@ -910,6 +751,7 @@ fn draw_http_request(
             hits,
         );
     } else {
+        textarea_util::set_placeholder(&mut s.body, "request body");
         draw_labeled_textarea(
             frame,
             rows[4],
@@ -1095,7 +937,7 @@ fn draw_http_form(
         .border_style(border)
         .title(Span::styled(
             format!(
-                " Form ({mode}) row {}/{} · a add · d del · Tab cell ",
+                " Form ({mode}) row {}/{} · ^N add · ^X del · Tab cell ",
                 if s.form_fields.is_empty() {
                     0
                 } else {
@@ -1157,29 +999,10 @@ fn draw_mini_ta(
     ta: &mut TextArea<'static>,
     focused: bool,
 ) {
-    if area.height == 0 {
+    if area.height == 0 || area.width == 0 {
         return;
     }
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(1), Constraint::Min(1)])
-        .split(area);
-    frame.render_widget(
-        Paragraph::new(Span::styled(format!(" {label}"), theme::label())),
-        chunks[0],
-    );
-    let border = if focused {
-        theme::accent()
-    } else {
-        theme::border()
-    };
-    ta.set_block(Block::default().borders(Borders::ALL).border_style(border));
-    if focused {
-        textarea_util::style_focused(ta);
-    } else {
-        textarea_util::style_unfocused(ta);
-    }
-    frame.render_widget(&*ta, chunks[1]);
+    draw_textarea_field(frame, area, label, ta, focused);
 }
 
 fn draw_labeled_textarea(
@@ -1194,27 +1017,85 @@ fn draw_labeled_textarea(
     if area.height == 0 || area.width == 0 {
         return;
     }
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(1), Constraint::Min(1)])
-        .split(area);
-    frame.render_widget(
-        Paragraph::new(Span::styled(format!(" {label}"), theme::label())),
-        chunks[0],
-    );
-    let border = if focused {
-        theme::accent()
+    let value = draw_textarea_field(frame, area, label, ta, focused);
+    hits.push(value, HitTarget::HttpField(field));
+}
+
+/// Label + editor. Full boxes need 3+ rows of editor; shorter areas drop the
+/// borders so Method/URL stay readable (a 1-row box had no inner height).
+fn draw_textarea_field(
+    frame: &mut Frame,
+    area: Rect,
+    label: &str,
+    ta: &mut TextArea<'static>,
+    focused: bool,
+) -> Rect {
+    let value_area = if area.height == 1 {
+        area
     } else {
-        theme::border()
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(1), Constraint::Min(1)])
+            .split(area);
+        frame.render_widget(
+            Paragraph::new(Span::styled(format!(" {label}"), theme::label())),
+            chunks[0],
+        );
+        chunks[1]
     };
-    ta.set_block(Block::default().borders(Borders::ALL).border_style(border));
+
+    style_textarea(ta, focused, value_area.height < 3, None);
+    frame.render_widget(&*ta, value_area);
+    value_area
+}
+
+fn style_textarea(
+    ta: &mut TextArea<'static>,
+    focused: bool,
+    compact: bool,
+    title: Option<Line<'static>>,
+) {
+    ta.set_block(textarea_block(focused, compact, title));
     if focused {
         textarea_util::style_focused(ta);
     } else {
         textarea_util::style_unfocused(ta);
     }
-    frame.render_widget(&*ta, chunks[1]);
-    hits.push(chunks[1], HitTarget::HttpField(field));
+}
+
+fn textarea_block(focused: bool, compact: bool, title: Option<Line<'static>>) -> Block<'static> {
+    let border = if focused {
+        theme::accent()
+    } else {
+        theme::border()
+    };
+    let mut block = if compact {
+        if focused {
+            Block::default().borders(Borders::LEFT).border_style(border)
+        } else {
+            Block::default()
+        }
+    } else {
+        Block::default().borders(Borders::ALL).border_style(border)
+    };
+    if let Some(title) = title {
+        block = block.title(title);
+    }
+    block
+}
+
+fn paint_textarea(
+    frame: &mut Frame,
+    area: Rect,
+    ta: &mut TextArea<'static>,
+    focused: bool,
+    title: Option<Line<'static>>,
+) {
+    if area.height == 0 || area.width == 0 {
+        return;
+    }
+    style_textarea(ta, focused, area.height < 3, title);
+    frame.render_widget(&*ta, area);
 }
 
 fn packet_wall_hms(wall: SystemTime) -> String {
@@ -1258,10 +1139,10 @@ fn draw_capture(
     let total = s.store.len();
     let spark_w = area.width.saturating_sub(40).max(8) as usize;
     let spark = io_sparkline(&s.stats.io.packet_series(), spark_w);
-    let cap_badge = if s.capturing {
-        Span::styled(" ● LIVE ", theme::success())
-    } else {
-        Span::styled(" ○ stopped ", theme::dim())
+    let cap_badge = match s.source {
+        crate::session::CaptureSource::File => Span::styled(" ■ FILE ", theme::blue()),
+        _ if s.capturing => Span::styled(" ● LIVE ", theme::success()),
+        _ => Span::styled(" ○ stopped ", theme::dim()),
     };
 
     let chunks = Layout::default()
@@ -1274,6 +1155,17 @@ fn draw_capture(
         .spans
         .push(Span::styled(format!(" │ {spark} "), theme::dim()));
     status.spans.push(cap_badge);
+    if !s.capture_filter_str.is_empty() {
+        let mode = if s.filter_kernel_bpf {
+            "kernel BPF"
+        } else {
+            "userspace"
+        };
+        status.spans.push(Span::styled(
+            format!(" · cfilter:{mode}"),
+            theme::dim(),
+        ));
+    }
     frame.render_widget(Paragraph::new(status), chunks[0]);
 
     let mid = Layout::default()
@@ -1326,8 +1218,41 @@ fn draw_capture_packet_list(
     )))];
 
     if filtered.is_empty() {
+        let empty_msg = if let Some(err) = &s.last_error {
+            format!("  capture error: {err}")
+        } else if s.status == ConnStatus::Error {
+            format!("  open failed — {}", crate::capture::backend::capture_hint())
+        } else if s.source == crate::session::CaptureSource::File {
+            if !s.display_filter_str.is_empty() {
+                format!(
+                    "  filter empty — display filter ({}) matches nothing",
+                    s.display_filter_str
+                )
+            } else {
+                "  empty capture file".into()
+            }
+        } else if !s.capturing && s.source == crate::session::CaptureSource::Live {
+            format!(
+                "  not started — F6 to capture · {}",
+                crate::capture::backend::capture_hint()
+            )
+        } else if s.capturing && !s.capture_filter_str.is_empty() {
+            format!(
+                "  capturing — no packets match filter ({})",
+                s.capture_filter_str
+            )
+        } else if s.capturing {
+            "  capturing — quiet (waiting for packets)".into()
+        } else if !s.display_filter_str.is_empty() {
+            format!(
+                "  filter empty — display filter ({}) matches nothing",
+                s.display_filter_str
+            )
+        } else {
+            "  waiting for packets — F6 start/stop capture".into()
+        };
         items.push(ListItem::new(Line::from(Span::styled(
-            "  waiting for packets — F6 start/stop capture",
+            empty_msg,
             theme::dim(),
         ))));
     } else {
@@ -1502,9 +1427,14 @@ fn draw_capture_overlay(frame: &mut Frame, area: Rect, ws: &Workspace, hits: &mu
     let (title, text) = match ws.overlay {
         Overlay::FollowStream => {
             if let Some(f) = &s.follow_view {
-                (f.label.clone(), f.text.clone())
+                let mut title = f.label.clone();
+                if f.objects.iter().any(|o| o.is_request) {
+                    title.push_str(" · r=replay HTTP");
+                }
+                title.push_str(" · Esc");
+                (title, f.text.clone())
             } else {
-                (" follow stream ".into(), "(no follow data)".into())
+                (" follow stream · Esc ".into(), "(no follow data)".into())
             }
         }
         Overlay::Conversations => {
@@ -1522,7 +1452,7 @@ fn draw_capture_overlay(frame: &mut Frame, area: Rect, ws: &Workspace, hits: &mu
             if t.is_empty() {
                 t = "(no conversations yet)".into();
             }
-            (" conversations ".into(), t)
+            (" conversations · ↑↓ Enter=filter · Esc ".into(), t)
         }
         Overlay::Endpoints => {
             let mut t = String::new();
@@ -1535,7 +1465,7 @@ fn draw_capture_overlay(frame: &mut Frame, area: Rect, ws: &Workspace, hits: &mu
             if t.is_empty() {
                 t = "(no endpoints yet)".into();
             }
-            (" endpoints ".into(), t)
+            (" endpoints · Esc ".into(), t)
         }
         Overlay::Hierarchy => {
             let mut t = String::new();
@@ -1545,7 +1475,7 @@ fn draw_capture_overlay(frame: &mut Frame, area: Rect, ws: &Workspace, hits: &mu
             if t.is_empty() {
                 t = "(no protocols yet)".into();
             }
-            (" protocol hierarchy ".into(), t)
+            (" protocol hierarchy · Esc ".into(), t)
         }
         Overlay::Expert => {
             let mut t = String::new();
@@ -1560,15 +1490,15 @@ fn draw_capture_overlay(frame: &mut Frame, area: Rect, ws: &Workspace, hits: &mu
             if t.is_empty() {
                 t = "(no expert info)".into();
             }
-            (" expert info ".into(), t)
+            (" expert info · Esc ".into(), t)
         }
         Overlay::Keylog => {
             let t = match (&s.keylog_path, s.keylog.as_ref()) {
                 (Some(p), Some(_)) => format!("loaded: {}\nTLS decrypt enabled", p.display()),
                 (Some(p), None) => format!("path set but not loaded: {}", p.display()),
-                _ => "no keylog loaded — use --keylog or :keylog".into(),
+                _ => "no keylog — : keylog PATH or --keylog".into(),
             };
-            (" keylog ".into(), t)
+            (" keylog · Esc ".into(), t)
         }
         _ => return,
     };
@@ -1868,23 +1798,14 @@ fn draw_composer(
         ));
     }
 
-    let border = if focused {
-        theme::accent()
-    } else {
-        theme::border()
-    };
-    composer.set_block(
-        Block::default()
-            .borders(Borders::ALL)
-            .border_style(border)
-            .title(Line::from(title_spans)),
+    textarea_util::set_placeholder(composer, "payload — Enter send");
+    paint_textarea(
+        frame,
+        area,
+        composer,
+        focused,
+        Some(Line::from(title_spans)),
     );
-    if focused {
-        textarea_util::style_focused(composer);
-    } else {
-        textarea_util::style_unfocused(composer);
-    }
-    frame.render_widget(&*composer, area);
 
     // Approximate title-button hit targets on the top border row
     let send_label = "[ Send ]";
@@ -1925,27 +1846,31 @@ fn draw_toast(frame: &mut Frame, area: Rect, ws: &Workspace) {
 
 fn draw_footer(frame: &mut Frame, area: Rect, ws: &Workspace, hits: &mut HitMap) {
     let kind = ws.active_session().map(|s| s.kind());
-    let frames_empty = ws
-        .active_session()
-        .map(|s| s.frame_count() == 0)
-        .unwrap_or(true);
 
     let capture_active = matches!(kind, Some(SessionKind::Capture));
-    let f6_label = if capture_active {
-        if matches!(
-            ws.active_session(),
-            Some(SessionSlot::Capture(s)) if s.capturing
-        ) {
-            "Stop"
-        } else {
-            "Start"
+    let (f6_label, f6_dim) = match ws.active_session() {
+        Some(SessionSlot::Capture(s))
+            if s.source == crate::session::CaptureSource::File =>
+        {
+            ("—", true)
         }
-    } else {
-        "Replay"
+        Some(SessionSlot::Capture(s)) => {
+            if s.capturing {
+                ("Stop", false)
+            } else {
+                ("Start", false)
+            }
+        }
+        Some(SessionSlot::Http(_)) => ("Send", false),
+        Some(SessionSlot::Stream(s)) if s.status == ConnStatus::Disconnected => ("Reconnect", false),
+        Some(SessionSlot::Stream(s)) => ("Replay", s.frames.is_empty()),
+        Some(SessionSlot::Listen(_)) => ("Send", false),
+        Some(SessionSlot::Diag(_)) => ("Run", false),
+        Some(SessionSlot::Proxy(_)) => ("Inject", false),
+        None => ("Replay", true),
     };
     let f12_label = if capture_active { "Save" } else { "Pcap" };
 
-    let f6_dim = !capture_active && frames_empty;
     let f7_dim = !matches!(kind, Some(SessionKind::Http));
     let f11_dim = !matches!(kind, Some(SessionKind::Stream | SessionKind::Listen));
 
@@ -2095,20 +2020,22 @@ KEYS & MOUSE                              SHORTCUTS
 F1–F12 match footer labels                j/k  move   g/G top/bottom
 Arrows / PgUp / PgDn / Home / End         h/l  cycle inspector format
 Tab / Shift+Tab cycle panes               /    filter (F8)
-Enter activate / send                     r    replay   q quit prompt
+Enter activate / send                     q    quit prompt
 Esc close overlay / clear filter          1-9  jump tab
 Click tabs, [+], pills, Send, footer      :    command palette
 Mouse wheel scrolls the log               Ctrl+T new   Ctrl+W close tab
 
 Composer & HTTP are normal text fields — visible cursor, no vim modes.
 HTTP: Enter sends (Method/URL/Headers); Body: Enter=newline, Ctrl+Enter=send
-: body-mode · auth · http-version · grpc · grpc-desc · grpc-type · oauth · pre-script
-: history · gql-introspect · mock · codegen NAME · rpcap host [iface]
-: manuf-status · geoip-status
+Stream: r / R replay selected frame · F6 Replay/Reconnect · composer Enter sends
+Capture: F6 Start/Stop · : sniff (from HTTP) · follow-http · r = replay into HTTP
+Proxy: Space/i TLS intercept on new · F6 Inject · : ca-path
+: body-mode · auth · test · tests · grpc · oauth · pre-script · sniff
+: history · gql-introspect · codegen NAME · rpcap host [iface] (experimental)
 Hex escapes: \\x00 \\n \\r \\t \\\\   · Ctrl+M toggles hex mode
 Listen: click [ Broadcast: on/off ] to toggle fan-out send
-New session: Mock HTTP server · CLI: --codegen · --import
-Capture: F6 start/stop · F12 save · : follow-tcp/udp/http · cfilter …{resize}"
+CLI: --codegen · --import
+Glue loop: HTTP URL → : sniff → packet → : follow-http → r → Enter send{resize}"
     );
     frame.render_widget(
         Paragraph::new(text).block(
@@ -2349,17 +2276,8 @@ fn draw_new_session_uri(
             chunks[1],
         );
         style_uri_field(&mut ws.uri_input, ws.uri_field == 0);
-        ws.uri_input
-            .set_block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_style(if ws.uri_field == 0 {
-                        theme::accent()
-                    } else {
-                        theme::border()
-                    }),
-            );
-        frame.render_widget(&ws.uri_input, chunks[2]);
+        textarea_util::set_placeholder(&mut ws.uri_input, Workspace::uri_placeholder(kind));
+        paint_textarea(frame, chunks[2], &mut ws.uri_input, ws.uri_field == 0, None);
 
         frame.render_widget(
             Paragraph::new(Span::styled(
@@ -2377,24 +2295,26 @@ fn draw_new_session_uri(
             chunks[3],
         );
         style_uri_field(&mut ws.uri_input2, ws.uri_field == 1);
-        ws.uri_input2
-            .set_block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_style(if ws.uri_field == 1 {
-                        theme::accent()
-                    } else {
-                        theme::border()
-                    }),
-            );
-        frame.render_widget(&ws.uri_input2, chunks[4]);
+        textarea_util::set_placeholder(&mut ws.uri_input2, "tcp://127.0.0.1:9090");
+        paint_textarea(
+            frame,
+            chunks[4],
+            &mut ws.uri_input2,
+            ws.uri_field == 1,
+            None,
+        );
         frame.render_widget(
             Paragraph::new(Span::styled(format!(" {msg}"), msg_style)),
             chunks[5],
         );
+        let mitm = if ws.uri_tls_intercept {
+            "TLS intercept: ON (Space/i toggle) · HTTP/1.1 ALPN only"
+        } else {
+            "TLS intercept: off (Space/i toggle)"
+        };
         frame.render_widget(
             Paragraph::new(Span::styled(
-                " Tab switch field · Enter open · Esc back",
+                format!(" Tab field · Enter open · Esc back · {mitm}"),
                 theme::dim(),
             )),
             chunks[6],
@@ -2405,12 +2325,8 @@ fn draw_new_session_uri(
             chunks[1],
         );
         style_uri_field(&mut ws.uri_input, true);
-        ws.uri_input.set_block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(theme::accent()),
-        );
-        frame.render_widget(&ws.uri_input, chunks[2]);
+        textarea_util::set_placeholder(&mut ws.uri_input, Workspace::uri_placeholder(kind));
+        paint_textarea(frame, chunks[2], &mut ws.uri_input, true, None);
         frame.render_widget(
             Paragraph::new(Span::styled(format!(" {msg}"), msg_style)),
             chunks[3],
@@ -2439,17 +2355,17 @@ fn draw_filter(frame: &mut Frame, area: Rect, ws: &mut Workspace, hits: &mut Hit
     );
     register_overlay_dismiss(area, r, hits);
     frame.render_widget(Clear, r);
-    ws.filter_input.set_block(
-        Block::default()
-            .borders(Borders::ALL)
-            .border_style(theme::accent())
-            .title(Span::styled(
-                " filter (text | hex:aabb | dir:in) ",
-                theme::title(),
-            )),
+    textarea_util::set_placeholder(&mut ws.filter_input, "text | hex:aabb | dir:in");
+    paint_textarea(
+        frame,
+        r,
+        &mut ws.filter_input,
+        true,
+        Some(Line::from(Span::styled(
+            " filter (text | hex:aabb | dir:in) ",
+            theme::title(),
+        ))),
     );
-    textarea_util::style_focused(&mut ws.filter_input);
-    frame.render_widget(&ws.filter_input, r);
 }
 
 fn draw_collections(frame: &mut Frame, area: Rect, ws: &Workspace, hits: &mut HitMap) {
@@ -2464,7 +2380,7 @@ fn draw_collections(frame: &mut Frame, area: Rect, ws: &Workspace, hits: &mut Hi
     let (title, items): (String, Vec<ListItem>) = if ws.collection_show_requests {
         let col = ws.collection.as_ref();
         let title = format!(
-            " requests · {} · {env} · Enter load · Tab/e env · Esc back ",
+            " requests · {} · {env} · Enter load · s overwrite · S append · d delete · Esc ",
             col.map(|c| c.name.as_str()).unwrap_or("?")
         );
         let items = if let Some(c) = col {
@@ -2484,7 +2400,22 @@ fn draw_collections(frame: &mut Frame, area: Rect, ws: &Workspace, hits: &mut Hi
                             theme::value()
                         };
                         let method = req.method.as_deref().unwrap_or("?");
-                        ListItem::new(Span::styled(format!("  {method}  {}", req.name), style))
+                        let mut badges = String::new();
+                        if req.kind == "grpc" || req.grpc_mode {
+                            badges.push_str(" [grpc]");
+                        }
+                        if !req.tests.is_empty() {
+                            badges.push_str(&format!(" [tests:{}]", req.tests.len()));
+                        }
+                        let label = format!("  {method:<6} {}{badges}", req.name);
+                        let row_y = r.y.saturating_add(1).saturating_add(i as u16);
+                        if row_y < r.y.saturating_add(r.height.saturating_sub(1)) {
+                            hits.push(
+                                Rect::new(r.x.saturating_add(1), row_y, r.width.saturating_sub(2), 1),
+                                HitTarget::CollectionRow(i),
+                            );
+                        }
+                        ListItem::new(Span::styled(label, style))
                     })
                     .collect()
             }
@@ -2509,6 +2440,13 @@ fn draw_collections(frame: &mut Frame, area: Rect, ws: &Workspace, hits: &mut Hi
                     } else {
                         theme::value()
                     };
+                    let row_y = r.y.saturating_add(1).saturating_add(i as u16);
+                    if row_y < r.y.saturating_add(r.height.saturating_sub(1)) {
+                        hits.push(
+                            Rect::new(r.x.saturating_add(1), row_y, r.width.saturating_sub(2), 1),
+                            HitTarget::CollectionRow(i),
+                        );
+                    }
                     ListItem::new(Span::styled(format!("  {n}"), style))
                 })
                 .collect()
@@ -2524,6 +2462,32 @@ fn draw_collections(frame: &mut Frame, area: Rect, ws: &Workspace, hits: &mut Hi
         ),
         r,
     );
+}
+
+fn draw_edit_overlay(frame: &mut Frame, area: Rect, ws: &mut Workspace, hits: &mut HitMap) {
+    let r = centered(area, 72, 16);
+    register_overlay_dismiss(area, r, hits);
+    frame.render_widget(Clear, r);
+    let title = match ws.overlay {
+        Overlay::TestsEdit => " tests (one expr/line) · Ctrl+Enter save · Esc cancel ",
+        Overlay::PreScriptEdit => " pre-script (Rhai) · Ctrl+Enter save · Esc cancel ",
+        _ => " edit ",
+    };
+    frame.render_widget(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(theme::accent())
+            .title(Span::styled(title, theme::title())),
+        r,
+    );
+    let inner = Rect::new(
+        r.x.saturating_add(1),
+        r.y.saturating_add(1),
+        r.width.saturating_sub(2),
+        r.height.saturating_sub(2),
+    );
+    style_textarea(&mut ws.edit_ta, true, false, None);
+    frame.render_widget(&ws.edit_ta, inner);
 }
 
 fn draw_bench(frame: &mut Frame, area: Rect, ws: &Workspace, hits: &mut HitMap) {
@@ -2557,7 +2521,7 @@ fn draw_bench(frame: &mut Frame, area: Rect, ws: &Workspace, hits: &mut HitMap) 
 }
 
 fn draw_fuzz(frame: &mut Frame, area: Rect, ws: &Workspace, hits: &mut HitMap) {
-    let r = centered(area, 50, 10);
+    let r = centered(area, 56, 12);
     register_overlay_dismiss(area, r, hits);
     frame.render_widget(Clear, r);
     let kinds: String = crate::fuzz::Mutator::all()
@@ -2567,7 +2531,11 @@ fn draw_fuzz(frame: &mut Frame, area: Rect, ws: &Workspace, hits: &mut HitMap) {
         .join(", ");
     frame.render_widget(
         Paragraph::new(format!(
-            "Mutators: {kinds}\n\nEnter sends one mutated copy of the composer\npayload to the active stream/listen session.\nSeed: {}",
+            "F11 / : fuzz — mutate composer payload once and send.\n\n\
+Mutators: {kinds}\n\n\
+Need an active Stream or Listen tab with composer text.\n\
+Enter = send mutated copy · Esc = cancel\n\
+Seed: {}",
             ws.fuzz_seed
         ))
         .block(
@@ -2584,17 +2552,20 @@ fn draw_palette(frame: &mut Frame, area: Rect, ws: &mut Workspace, hits: &mut Hi
     let r = Rect::new(area.x + 4, area.y + 2, area.width.saturating_sub(8), 3);
     register_overlay_dismiss(area, r, hits);
     frame.render_widget(Clear, r);
-    ws.palette_input.set_block(
-        Block::default()
-            .borders(Borders::ALL)
-            .border_style(theme::accent())
-            .title(Span::styled(
-                " command (stream/http/capture/follow-*/help/quit) ",
-                theme::title(),
-            )),
+    textarea_util::set_placeholder(
+        &mut ws.palette_input,
+        "sniff · follow-http · replay-http · help",
     );
-    textarea_util::style_focused(&mut ws.palette_input);
-    frame.render_widget(&ws.palette_input, r);
+    paint_textarea(
+        frame,
+        r,
+        &mut ws.palette_input,
+        true,
+        Some(Line::from(Span::styled(
+            " : sniff → follow-http → r · help · quit ",
+            theme::title(),
+        ))),
+    );
 }
 
 /// Draw into a TestBackend for smoke tests.
@@ -2611,4 +2582,16 @@ pub fn draw_test(
         })
         .expect("draw");
     terminal
+}
+
+pub fn screen_text(term: &ratatui::Terminal<ratatui::backend::TestBackend>) -> String {
+    let buf = term.backend().buffer();
+    let mut screen = String::new();
+    for y in 0..buf.area.height {
+        for x in 0..buf.area.width {
+            screen.push_str(buf[(x, y)].symbol());
+        }
+        screen.push('\n');
+    }
+    screen
 }

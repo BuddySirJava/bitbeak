@@ -22,9 +22,17 @@ Or in the TUI: **F2 → Capture / Open file**, or palette:
 | Command | Action |
 | --- | --- |
 | `:` `capture eth0` | Live on interface |
-| `:` `open /path/file.pcapng` | Open file |
-| `:` `rpcap host[:port]` | Probe remote rpcap |
-| `:` `rpcap host[:port] iface` | Live via `rpcap://host:port/iface` |
+| `:` `open /path/file.pcapng` | Open **pcap / pcapng** file |
+| `:` `rpcap host[:port]` | Probe remote rpcap (**experimental**) |
+| `:` `rpcap host[:port] iface` | Live via `rpcap://host:port/iface` (**experimental**) |
+
+### File mode (honest limits)
+
+- Formats: classic **pcap** and **pcapng** (Enhanced/Simple packets). Not gzip.
+- Ring: only the last `--max-frames` packets are kept (default 10 000). Status shows `showing N/M` when truncated.
+- Follow TCP/HTTP works on Ethernet, Linux SLL/`any`, Raw, and Null/loopback. 802.11 follow is not a goal.
+- **F6** is disabled on files (no live restart). Use **F8** display filter — `: cfilter` is live-only.
+- Save: F12 / `: save` = displayed; `: save-all` = everything still in the ring.
 
 ## Keys (capture tab focused)
 
@@ -82,6 +90,10 @@ Supports TLS 1.2 / 1.3 application data when secrets are present. AES-128 and AE
 ## Linux TPACKET_V3
 
 AF_PACKET negotiates **TPACKET_V3** automatically when the kernel supports it; otherwise falls back.
+
+## Remote capture (rpcap)
+
+**Experimental.** Best-effort Wireshark rpcap client for remote sniff. Protocol coverage and server compatibility vary — treat as a convenience probe, not a supported production path.
 
 ## Optional data files
 

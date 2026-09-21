@@ -17,6 +17,7 @@ pub struct GrpcRequest {
     pub url: String, // https://host/package.Service/Method
     pub message: Bytes,
     pub authority: String,
+    pub headers: Vec<(String, String)>,
 }
 
 #[derive(Debug, Clone)]
@@ -92,11 +93,14 @@ pub fn decode_frames(data: &[u8]) -> Result<Vec<Bytes>> {
     let mut out = Vec::new();
     let mut i = 0;
     while i + 5 <= data.len() {
-        let _comp = data[i];
+        let comp = data[i];
         let len = u32::from_be_bytes([data[i + 1], data[i + 2], data[i + 3], data[i + 4]]) as usize;
         i += 5;
         if i + len > data.len() {
             bail!("truncated grpc frame");
+        }
+        if comp != 0 {
+            bail!("compressed gRPC frames are not supported (flag={comp})");
         }
         out.push(Bytes::copy_from_slice(&data[i..i + len]));
         i += len;
@@ -112,12 +116,27 @@ pub async fn unary_call(req: &GrpcRequest) -> Result<GrpcResponse> {
         .build();
     let client: Client<_, Full<Bytes>> = Client::builder(TokioExecutor::new()).build(https);
     let body = encode_frame(&req.message);
-    let builder = Request::builder()
+    let mut builder = Request::builder()
         .method("POST")
         .uri(&req.url)
         .header("content-type", "application/grpc")
         .header("te", "trailers")
         .header("user-agent", "bitbeak-grpc/0.1");
+    if !req.authority.is_empty() {
+        builder = builder.header(":authority", &req.authority);
+        // hyper may reject :authority as a regular header; also set Host for clarity
+        builder = builder.header("host", &req.authority);
+    }
+    for (k, v) in &req.headers {
+        if k.eq_ignore_ascii_case("content-type")
+            || k.eq_ignore_ascii_case("te")
+            || k.eq_ignore_ascii_case("host")
+            || k.starts_with(':')
+        {
+            continue;
+        }
+        builder = builder.header(k.as_str(), v.as_str());
+    }
     let http_req = builder.body(Full::new(body)).context("build grpc req")?;
     let resp = client.request(http_req).await.context("grpc request")?;
     let mut headers = Vec::new();
@@ -128,25 +147,51 @@ pub async fn unary_call(req: &GrpcRequest) -> Result<GrpcResponse> {
         ));
     }
     let collected = resp.into_body().collect().await.context("grpc body")?;
+    if let Some(trailers) = collected.trailers() {
+        let trailer_pairs: Vec<_> = trailers
+            .iter()
+            .map(|(k, v)| {
+                (
+                    k.as_str().to_string(),
+                    String::from_utf8_lossy(v.as_bytes()).into_owned(),
+                )
+            })
+            .collect();
+        merge_grpc_metadata(&mut headers, &trailer_pairs);
+    }
     let bytes = collected.to_bytes();
-    let frames = decode_frames(&bytes).unwrap_or_default();
+    let frames = decode_frames(&bytes)?;
     let message = frames.into_iter().next().unwrap_or_default();
-    let grpc_status = headers
-        .iter()
-        .find(|(k, _)| k.eq_ignore_ascii_case("grpc-status"))
-        .and_then(|(_, v)| v.parse().ok())
-        .unwrap_or(0);
-    let grpc_message = headers
-        .iter()
-        .find(|(k, _)| k.eq_ignore_ascii_case("grpc-message"))
-        .map(|(_, v)| v.clone())
-        .unwrap_or_default();
+    let grpc_status = header_i32(&headers, "grpc-status").unwrap_or(0);
+    let grpc_message = header_str(&headers, "grpc-message").unwrap_or_default();
     Ok(GrpcResponse {
         grpc_status,
         grpc_message,
         message,
         headers,
     })
+}
+
+fn header_i32(headers: &[(String, String)], name: &str) -> Option<i32> {
+    headers
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case(name))
+        .and_then(|(_, v)| v.parse().ok())
+}
+
+fn header_str(headers: &[(String, String)], name: &str) -> Option<String> {
+    headers
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case(name))
+        .map(|(_, v)| v.clone())
+}
+
+/// Merge trailer pairs over headers (trailers win on name collision).
+pub fn merge_grpc_metadata(headers: &mut Vec<(String, String)>, trailers: &[(String, String)]) {
+    for (name, val) in trailers {
+        headers.retain(|(hk, _)| !hk.eq_ignore_ascii_case(name));
+        headers.push((name.clone(), val.clone()));
+    }
 }
 
 #[cfg(test)]
@@ -235,6 +280,23 @@ mod tests {
         assert_eq!(
             reply_message_type("test.HelloRequest", ""),
             "test.HelloResponse"
+        );
+    }
+
+    #[test]
+    fn trailers_override_headers_for_grpc_status() {
+        let mut headers = vec![("grpc-status".into(), "0".into())];
+        merge_grpc_metadata(
+            &mut headers,
+            &[
+                ("grpc-status".into(), "14".into()),
+                ("grpc-message".into(), "unavailable".into()),
+            ],
+        );
+        assert_eq!(header_i32(&headers, "grpc-status"), Some(14));
+        assert_eq!(
+            header_str(&headers, "grpc-message").as_deref(),
+            Some("unavailable")
         );
     }
 }

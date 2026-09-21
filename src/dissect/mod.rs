@@ -31,7 +31,9 @@ pub use analysis::{
 pub use coloring::{color_for_packet, ColorRule};
 pub use decrypt::{DecryptState, KeyLog};
 pub use expert::{ExpertInfo, ExpertSeverity};
-pub use follow::{follow_http, follow_tcp, follow_udp, FollowResult, HttpObject};
+pub use follow::{
+    capture_filter_for_url, follow_http, follow_tcp, follow_udp, FollowResult, HttpObject,
+};
 pub use geoip::GeoDb;
 pub use names::NameResolver;
 pub use packet::{DisplayFields, LinkType, PacketRecord, PacketStore, PacketSummary};

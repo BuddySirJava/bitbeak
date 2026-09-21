@@ -9,7 +9,7 @@ title: BitBeak docs
 
 # BitBeak documentation
 
-**Postman + Wireshark + netcat + mitmproxy + dig/ping** — one keyboard-driven binary for headless servers.
+**Keyboard network Swiss army knife** — HTTP, capture, streams, proxy, and diag in one binary. Blades hand off to each other (`: sniff` → follow → `r` replay). Not a Postman/Wireshark/mitmproxy clone.
 
 Source: [github.com/bitbeak/bitbeak](https://github.com/bitbeak/bitbeak) · License: [AGPL-3.0-or-later](https://github.com/bitbeak/bitbeak/blob/master/LICENSE)
 
@@ -18,7 +18,7 @@ Source: [github.com/bitbeak/bitbeak](https://github.com/bitbeak/bitbeak) · Lice
 | Guide | Contents |
 | --- | --- |
 | [Install & build](install.md) | Cargo build, privileges, Npcap / BPF / `CAP_NET_RAW` |
-| [Sessions](sessions.md) | Stream, HTTP, listen, proxy, diagnose, mock, capture tabs |
+| [Sessions](sessions.md) | Stream, HTTP, listen, proxy, diagnose, capture tabs |
 | [HTTP / GraphQL / gRPC](http.md) | Auth, body modes, scripts, history, OAuth |
 | [Capture](capture.md) | Live sniff, pcap/pcapng, keylog, QUIC, rpcap, GeoIP, manuf |
 | [Filters](filters.md) | Capture filter vs display filter (Wireshark subset) |

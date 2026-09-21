@@ -1,4 +1,5 @@
 /target/
+brag-output/
 **/*.rs.bk
 *.pcap
 .idea/

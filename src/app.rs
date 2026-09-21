@@ -227,6 +227,10 @@ async fn handle_key(ws: &mut Workspace, key: KeyEvent, fan_tx: &FanTx) -> Result
             handle_collections_keys(ws, key);
             return Ok(false);
         }
+        Overlay::TestsEdit | Overlay::PreScriptEdit => {
+            handle_edit_overlay_keys(ws, key);
+            return Ok(false);
+        }
         Overlay::Bench | Overlay::Fuzz => {
             if key.code == KeyCode::Esc {
                 ws.overlay = Overlay::None;
@@ -236,8 +240,17 @@ async fn handle_key(ws: &mut Workspace, key: KeyEvent, fan_tx: &FanTx) -> Result
             }
             return Ok(false);
         }
-        Overlay::FollowStream
-        | Overlay::Endpoints
+        Overlay::FollowStream => {
+            if key.code == KeyCode::Char('r') {
+                replay_follow_into_http(ws);
+                return Ok(false);
+            }
+            if matches!(key.code, KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q')) {
+                ws.overlay = Overlay::None;
+            }
+            return Ok(false);
+        }
+        Overlay::Endpoints
         | Overlay::Hierarchy
         | Overlay::Expert
         | Overlay::Keylog => {
@@ -521,6 +534,13 @@ fn handle_uri_keys(ws: &mut Workspace, key: KeyEvent, kind: usize, fan_tx: &FanT
                 textarea_util::style_focused(&mut ws.uri_input2);
             }
         }
+        KeyCode::Char(' ') | KeyCode::Char('i') if kind == 3 => {
+            ws.uri_tls_intercept = !ws.uri_tls_intercept;
+            ws.flash_ok(format!(
+                "TLS intercept {}",
+                if ws.uri_tls_intercept { "ON" } else { "OFF" }
+            ));
+        }
         KeyCode::Enter => {
             open_uri_entry(ws, kind, fan_tx);
         }
@@ -591,18 +611,28 @@ fn open_from_uri(ws: &mut Workspace, kind: usize, uri: &str, fan_tx: &FanTx) {
             }
         },
         3 => {
-            // palette / legacy: bind|upstream
-            let parts: Vec<_> = uri.split('|').collect();
+            // palette / legacy: bind|upstream [--tls-intercept already applied via uri_tls_intercept]
+            let cleaned = uri
+                .replace("--tls-intercept", "")
+                .replace("--mitm", "");
+            if cleaned.contains("--tls-intercept") || uri.contains("--tls-intercept") || uri.contains("--mitm")
+            {
+                ws.uri_tls_intercept = true;
+            }
+            let parts: Vec<_> = cleaned.split('|').map(str::trim).filter(|s| !s.is_empty()).collect();
             if parts.len() == 2 {
-                match (parse_target(parts[0].trim()), parse_target(parts[1].trim())) {
-                    (Ok(b), Ok(u)) => ws.open_proxy(b, u),
+                match (parse_target(parts[0]), parse_target(parts[1])) {
+                    (Ok(b), Ok(u)) => {
+                        let mitm = ws.uri_tls_intercept;
+                        ws.open_proxy_mitm(b, u, mitm);
+                    }
                     _ => {
-                        ws.flash_err("proxy URI: tcp://127.0.0.1:8080|tcp://127.0.0.1:9090");
+                        ws.flash_err("proxy URI: tcp://127.0.0.1:8080|tcp://127.0.0.1:9090 [--tls-intercept]");
                         return;
                     }
                 }
             } else {
-                ws.flash_err("proxy URI: bind|upstream");
+                ws.flash_err("proxy URI: bind|upstream [--tls-intercept]");
                 return;
             }
         }
@@ -623,13 +653,6 @@ fn open_from_uri(ws: &mut Workspace, kind: usize, uri: &str, fan_tx: &FanTx) {
                 return;
             }
         },
-        7 => match parse_target(uri) {
-            Ok(t) => ws.open_mock(t),
-            Err(e) => {
-                ws.flash_err(format!("bad mock bind: {e}"));
-                return;
-            }
-        },
         _ => return,
     }
     if ws.sessions.len() > idx_before {
@@ -637,6 +660,42 @@ fn open_from_uri(ws: &mut Workspace, kind: usize, uri: &str, fan_tx: &FanTx) {
             attach_io(ws, fan_tx, idx_before);
         }
         ws.flash_ok(format!("opened {}", ws.sessions[idx_before].title()));
+    }
+}
+
+fn handle_edit_overlay_keys(ws: &mut Workspace, key: KeyEvent) {
+    match key.code {
+        KeyCode::Esc => {
+            ws.overlay = Overlay::None;
+        }
+        KeyCode::Enter if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            let text = textarea_util::text_of(&ws.edit_ta);
+            match ws.overlay {
+                Overlay::TestsEdit => {
+                    if let Some(SessionSlot::Http(s)) = ws.active_session_mut() {
+                        s.tests = text
+                            .lines()
+                            .map(str::trim)
+                            .filter(|l| !l.is_empty() && !l.starts_with('#'))
+                            .map(|expr| crate::http::RequestTest {
+                                expr: expr.to_string(),
+                            })
+                            .collect();
+                        let n = s.tests.len();
+                        ws.flash_ok(format!("tests set ({n})"));
+                    }
+                }
+                Overlay::PreScriptEdit => {
+                    if let Some(SessionSlot::Http(s)) = ws.active_session_mut() {
+                        s.pre_script = text;
+                        ws.flash_ok("pre-script saved");
+                    }
+                }
+                _ => {}
+            }
+            ws.overlay = Overlay::None;
+        }
+        _ => textarea_util::input(&mut ws.edit_ta, key),
     }
 }
 
@@ -679,6 +738,37 @@ fn handle_collections_keys(ws: &mut Workspace, key: KeyEvent) {
                 ws.collection_cursor += 1;
             }
         }
+        KeyCode::Char('d') => {
+            if ws.collection_show_requests {
+                if let Some(col) = ws.collection.as_mut() {
+                    if ws.request_cursor < col.requests.len() {
+                        let name = col.requests[ws.request_cursor].name.clone();
+                        col.requests.remove(ws.request_cursor);
+                        if ws.request_cursor > 0 && ws.request_cursor >= col.requests.len() {
+                            ws.request_cursor -= 1;
+                        }
+                        match crate::collections::save_collection(col) {
+                            Ok(_) => ws.flash_ok(format!("deleted {name}")),
+                            Err(e) => ws.flash_err(format!("{e:#}")),
+                        }
+                    }
+                }
+            }
+        }
+        KeyCode::Char('S') => {
+            // Shift+S = save-as append
+            save_http_to_collection(ws, true);
+        }
+        KeyCode::Char('s') => {
+            // Overwrite selected when viewing requests; else append
+            let overwrite = ws.collection_show_requests
+                && ws
+                    .collection
+                    .as_ref()
+                    .map(|c| !c.requests.is_empty())
+                    .unwrap_or(false);
+            save_http_to_collection(ws, !overwrite);
+        }
         KeyCode::Enter => {
             if ws.collection_show_requests {
                 let req = ws
@@ -706,25 +796,47 @@ fn handle_collections_keys(ws: &mut Workspace, key: KeyEvent) {
                 }
             }
         }
-        KeyCode::Char('s') => {
-            if let Some(SessionSlot::Http(s)) = ws.active_session() {
-                let mut col = ws
-                    .collection
-                    .clone()
-                    .unwrap_or_else(|| crate::collections::Collection::new("default"));
-                let method = textarea_util::text_of(&s.method);
-                let url = textarea_util::text_of(&s.url);
-                col.requests.push(s.to_saved(format!("{method} {url}")));
-                match crate::collections::save_collection(&col) {
-                    Ok(p) => {
-                        ws.flash_ok(format!("saved {}", p.display()));
-                        ws.collection = Some(col);
-                    }
-                    Err(e) => ws.flash_err(format!("{e:#}")),
-                }
+        _ => {}
+    }
+}
+
+fn save_http_to_collection(ws: &mut Workspace, append: bool) {
+    let Some(SessionSlot::Http(s)) = ws.active_session() else {
+        ws.flash_err("need HTTP session to save");
+        return;
+    };
+    let method = textarea_util::text_of(&s.method);
+    let url = textarea_util::text_of(&s.url);
+    let saved = s.to_saved(format!("{method} {url}"));
+    let mut col = ws
+        .collection
+        .clone()
+        .unwrap_or_else(|| crate::collections::Collection::new("default"));
+    if append || col.requests.is_empty() || !ws.collection_show_requests {
+        col.requests.push(saved);
+        ws.request_cursor = col.requests.len().saturating_sub(1);
+    } else if ws.request_cursor < col.requests.len() {
+        let name = col.requests[ws.request_cursor].name.clone();
+        let mut saved = saved;
+        saved.name = name;
+        col.requests[ws.request_cursor] = saved;
+    } else {
+        col.requests.push(saved);
+    }
+    match crate::collections::save_collection(&col) {
+        Ok(p) => {
+            ws.flash_ok(format!(
+                "{} {}",
+                if append { "appended" } else { "saved" },
+                p.display()
+            ));
+            ws.collection = Some(col);
+            ws.collection_names = crate::collections::list_collections().unwrap_or_default();
+            if !ws.collection_show_requests {
+                ws.collection_show_requests = true;
             }
         }
-        _ => {}
+        Err(e) => ws.flash_err(format!("{e:#}")),
     }
 }
 
@@ -784,16 +896,25 @@ where
 }
 
 fn capture_composer(ws: &mut Workspace, fan_tx: &FanTx) {
-    let payload = ws.active_session().and_then(|s| match s {
-        SessionSlot::Capture(c) => c.selected_payload_for_composer(),
-        _ => None,
-    });
-    let Some(payload) = payload else {
+    let Some(SessionSlot::Capture(c)) = ws.active_session() else {
+        ws.flash_err("composer: need capture session");
+        return;
+    };
+    let Some(pkt) = c.visible_packet() else {
         ws.flash_err("composer: select a packet first");
         return;
     };
+    if pkt.summary.dst.is_empty() {
+        ws.flash_err("composer: selected packet has no peer address");
+        return;
+    }
+    let peer_uri = composer_uri_from_packet(pkt);
+    let Some(payload) = c.selected_payload_for_composer() else {
+        ws.flash_err("composer: no payload on selected packet");
+        return;
+    };
     let idx_before = ws.sessions.len();
-    match parse_target("tcp://127.0.0.1:9090") {
+    match parse_target(&peer_uri) {
         Ok(t) => ws.open_stream(t),
         Err(e) => {
             ws.flash_err(format!("composer: {e}"));
@@ -807,7 +928,116 @@ fn capture_composer(ws: &mut Workspace, fan_tx: &FanTx) {
         textarea_util::set_text(&mut s.composer, &text);
         s.set_focus(PaneFocus::Composer);
     }
-    ws.flash_ok("composer loaded from capture");
+    ws.flash_ok(format!("composer → {peer_uri}"));
+}
+
+fn composer_uri_from_packet(p: &crate::dissect::PacketRecord) -> String {
+    let host = p
+        .field("ip.dst")
+        .filter(|h| !h.is_empty())
+        .unwrap_or_else(|| {
+            p.summary
+                .dst
+                .rsplit_once(':')
+                .map(|(h, _)| h.to_string())
+                .unwrap_or_else(|| p.summary.dst.clone())
+        });
+    let port = p
+        .field("tcp.dstport")
+        .or_else(|| p.field("udp.dstport"))
+        .and_then(|s| s.parse::<u16>().ok())
+        .unwrap_or(80);
+    if host.contains(':') && !host.starts_with('[') {
+        format!("tcp://[{host}]:{port}")
+    } else {
+        format!("tcp://{host}:{port}")
+    }
+}
+
+fn replay_follow_into_http(ws: &mut Workspace) {
+    let obj = ws.active_session().and_then(|s| match s {
+        SessionSlot::Capture(c) => c
+            .follow_view
+            .as_ref()
+            .and_then(|f| f.objects.iter().find(|o| o.is_request).cloned()),
+        _ => None,
+    });
+    let Some(obj) = obj else {
+        ws.flash_err("no HTTP request in follow — : follow-http on a request packet");
+        return;
+    };
+    if obj.url.is_empty() && !matches!(ws.active_session(), Some(SessionSlot::Http(_))) {
+        ws.flash_err("HTTP request has no URL (missing Host?) — open an HTTP tab first");
+        return;
+    }
+    if !matches!(ws.active_session(), Some(SessionSlot::Http(_))) {
+        let url = obj.url.clone();
+        let secure = url.starts_with("https://");
+        ws.sessions
+            .push(SessionSlot::Http(crate::session::HttpSession::new(
+                crate::cli::Target::Http { url, secure },
+                ws.max_frames,
+            )));
+        ws.active = ws.sessions.len() - 1;
+    }
+    if let Some(SessionSlot::Http(s)) = ws.active_session_mut() {
+        s.load_http_object(&obj);
+        ws.overlay = Overlay::None;
+        ws.flash_ok("replayed into HTTP — Enter to send");
+    }
+}
+
+fn sniff_from_http(ws: &mut Workspace, iface: Option<&str>) {
+    let url = match ws.active_session() {
+        Some(SessionSlot::Http(s)) => textarea_util::text_of(&s.url),
+        _ => {
+            ws.flash_err("sniff: need HTTP session with a URL");
+            return;
+        }
+    };
+    let Some(filter) = crate::dissect::capture_filter_for_url(&url) else {
+        ws.flash_err("sniff: could not parse host from URL");
+        return;
+    };
+    let want_iface = iface.unwrap_or("any");
+
+    // Reuse an existing live capture only when the interface matches.
+    let existing = ws.sessions.iter().position(|s| {
+        matches!(
+            s,
+            SessionSlot::Capture(c)
+                if c.source == crate::session::CaptureSource::Live
+                    && c.title_iface == want_iface
+        )
+    });
+    if let Some(idx) = existing {
+        ws.active = idx;
+    } else {
+        ws.open_capture(want_iface);
+    }
+
+    if let Some(SessionSlot::Capture(s)) = ws.active_session_mut() {
+        let iface_name = s.title_iface.clone();
+        match s.set_capture_filter(&filter) {
+            Ok(()) => {
+                let crumb = format!(
+                    "sniffing {filter} on {iface_name} · F6 stop · : follow-http · r replay"
+                );
+                if !s.capturing {
+                    match s.start_capture() {
+                        Ok(()) => ws.flash_ok(crumb),
+                        Err(e) => {
+                            let hint = crate::capture::backend::capture_hint();
+                            ws.flash_err(format!("capture start failed: {e:#} · {hint}"));
+                        }
+                    }
+                } else {
+                    ws.flash_ok(crumb);
+                }
+            }
+            Err(e) => ws.flash_err(format!("cfilter: {e}")),
+        }
+    }
 }
 
 fn run_palette_command(ws: &mut Workspace, cmd: &str, fan_tx: &FanTx) {
@@ -824,7 +1054,27 @@ fn run_palette_command(ws: &mut Workspace, cmd: &str, fan_tx: &FanTx) {
     } else if let Some(rest) = cmd.strip_prefix("listen ") {
         open_from_uri(ws, 2, rest, fan_tx);
     } else if let Some(rest) = cmd.strip_prefix("proxy ") {
-        open_from_uri(ws, 3, rest, fan_tx);
+        let mut tls = false;
+        let mut parts = Vec::new();
+        for tok in rest.split_whitespace() {
+            if tok == "--tls-intercept" || tok == "--mitm" {
+                tls = true;
+            } else {
+                parts.push(tok);
+            }
+        }
+        ws.uri_tls_intercept = tls;
+        let uri = parts.join(" ");
+        open_from_uri(ws, 3, &uri, fan_tx);
+    } else if cmd == "ca-path" {
+        let path = crate::tls_mitm::MitmCa::ca_dir().join("ca.pem");
+        match crate::tls_mitm::MitmCa::load_or_create() {
+            Ok(ca) => ws.flash_ok(format!(
+                "CA PEM: {} (install in client trust store; HTTP/1.1 ALPN only)",
+                ca.ca_pem_path().display()
+            )),
+            Err(e) => ws.flash_err(format!("CA: {e:#} · expected {}", path.display())),
+        }
     } else if let Some(rest) = cmd.strip_prefix("diag ") {
         open_from_uri(ws, 4, rest, fan_tx);
     } else if let Some(rest) = cmd.strip_prefix("capture ") {
@@ -835,20 +1085,55 @@ fn run_palette_command(ws: &mut Workspace, cmd: &str, fan_tx: &FanTx) {
             Err(e) => ws.flash_err(format!("{e:#}")),
         }
     } else if cmd == "follow-tcp" {
-        capture_palette(ws, |s| {
-            s.follow_selected_tcp();
-            Some(Overlay::FollowStream)
-        });
+        if let Some(SessionSlot::Capture(s)) = ws.active_session_mut() {
+            if s.follow_selected_tcp() {
+                ws.overlay = Overlay::FollowStream;
+            } else {
+                ws.flash_err("follow-tcp: select a packet first");
+            }
+        } else {
+            ws.flash_err("need capture session");
+        }
     } else if cmd == "follow-udp" {
-        capture_palette(ws, |s| {
-            s.follow_selected_udp();
-            Some(Overlay::FollowStream)
-        });
+        if let Some(SessionSlot::Capture(s)) = ws.active_session_mut() {
+            if s.follow_selected_udp() {
+                ws.overlay = Overlay::FollowStream;
+            } else {
+                ws.flash_err("follow-udp: select a packet first");
+            }
+        } else {
+            ws.flash_err("need capture session");
+        }
     } else if cmd == "follow-http" {
-        capture_palette(ws, |s| {
-            s.follow_selected_http();
-            Some(Overlay::FollowStream)
-        });
+        if let Some(SessionSlot::Capture(s)) = ws.active_session_mut() {
+            if !s.follow_selected_http() {
+                ws.flash_err("follow-http: select a packet first");
+            } else {
+                let n = s
+                    .follow_view
+                    .as_ref()
+                    .map(|f| f.objects.len())
+                    .unwrap_or(0);
+                ws.overlay = Overlay::FollowStream;
+                if n == 0 {
+                    ws.flash_err(
+                        "no HTTP objects — try : keylog PATH, or pick cleartext HTTP",
+                    );
+                } else {
+                    ws.flash_ok(format!("follow-http · {n} object(s) · r = replay"));
+                }
+            }
+        } else {
+            ws.flash_err("need capture session");
+        }
+    } else if cmd == "sniff" || cmd.starts_with("sniff ") || cmd == "capture-http" || cmd.starts_with("capture-http ")
+    {
+        let iface = cmd
+            .strip_prefix("sniff ")
+            .or_else(|| cmd.strip_prefix("capture-http "))
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        sniff_from_http(ws, iface);
     } else if cmd == "conversations" {
         capture_palette(ws, |_| Some(Overlay::Conversations));
     } else if cmd == "endpoints" {
@@ -859,6 +1144,23 @@ fn run_palette_command(ws: &mut Workspace, cmd: &str, fan_tx: &FanTx) {
         capture_palette(ws, |_| Some(Overlay::Expert));
     } else if cmd == "keylog" {
         capture_palette(ws, |_| Some(Overlay::Keylog));
+    } else if let Some(rest) = cmd.strip_prefix("keylog ") {
+        let path = rest.trim();
+        if let Some(SessionSlot::Capture(s)) = ws.active_session_mut() {
+            match s.load_keylog(std::path::Path::new(path)) {
+                Ok(()) => ws.flash_ok(format!("keylog loaded {path}")),
+                Err(e) => ws.flash_err(format!("keylog: {e:#}")),
+            }
+        } else {
+            ws.flash_err("need capture session");
+        }
+    } else if let Some(rest) = cmd.strip_prefix("save ") {
+        let path = rest.trim();
+        save_capture(ws, Some(path), false);
+    } else if cmd == "save" {
+        save_capture(ws, None, false);
+    } else if cmd == "save-all" {
+        save_capture(ws, None, true);
     } else if cmd == "inject" {
         if let Some(SessionSlot::Capture(s)) = ws.active_session_mut() {
             match s.inject_selected() {
@@ -871,10 +1173,31 @@ fn run_palette_command(ws: &mut Workspace, cmd: &str, fan_tx: &FanTx) {
     } else if cmd == "composer" {
         capture_composer(ws, fan_tx);
     } else if cmd == "replay-http" {
-        capture_palette(ws, |s| {
-            s.follow_selected_http();
-            Some(Overlay::FollowStream)
-        });
+        if let Some(SessionSlot::Capture(s)) = ws.active_session_mut() {
+            let needs_follow = s
+                .follow_view
+                .as_ref()
+                .map(|f| f.objects.iter().all(|o| !o.is_request))
+                .unwrap_or(true);
+            if needs_follow && !s.follow_selected_http() {
+                ws.flash_err("replay-http: select a packet first");
+                return;
+            }
+            let has_req = s
+                .follow_view
+                .as_ref()
+                .map(|f| f.objects.iter().any(|o| o.is_request))
+                .unwrap_or(false);
+            if has_req {
+                replay_follow_into_http(ws);
+            } else {
+                ws.flash_err(
+                    "replay-http: no HTTP request — try : keylog PATH or a cleartext stream",
+                );
+            }
+        } else {
+            ws.flash_err("need capture session");
+        }
     } else if cmd == "names-toggle" {
         if let Some(SessionSlot::Capture(s)) = ws.active_session_mut() {
             s.names.enabled = !s.names.enabled;
@@ -1079,10 +1402,6 @@ fn run_palette_command(ws: &mut Workspace, cmd: &str, fan_tx: &FanTx) {
         } else {
             ws.flash_err("need HTTP session");
         }
-    } else if let Some(rest) = cmd.strip_prefix("mock ") {
-        open_from_uri(ws, 7, rest, fan_tx);
-    } else if cmd == "mock" {
-        open_from_uri(ws, 7, "tcp://127.0.0.1:18080", fan_tx);
     } else if let Some(rest) = cmd.strip_prefix("rpcap ") {
         let parts: Vec<_> = rest.split_whitespace().collect();
         if parts.len() >= 2 {
@@ -1097,8 +1416,10 @@ fn run_palette_command(ws: &mut Workspace, cmd: &str, fan_tx: &FanTx) {
             ws.open_capture(&target);
             if let Some(SessionSlot::Capture(s)) = ws.active_session_mut() {
                 match s.start_capture() {
-                    Ok(()) => ws.flash_ok(format!("rpcap capturing {target}")),
-                    Err(e) => ws.flash_err(format!("rpcap: {e:#}")),
+                    Ok(()) => ws.flash_ok(format!(
+                        "rpcap (experimental) capturing {target}"
+                    )),
+                    Err(e) => ws.flash_err(format!("rpcap (experimental): {e:#}")),
                 }
             }
         } else if parts.len() == 1 {
@@ -1109,8 +1430,8 @@ fn run_palette_command(ws: &mut Workspace, cmd: &str, fan_tx: &FanTx) {
                 (host, 2002)
             };
             match crate::capture::rpcap::probe(host, port) {
-                Ok(msg) => ws.flash_ok(msg),
-                Err(e) => ws.flash_err(format!("rpcap: {e:#}")),
+                Ok(msg) => ws.flash_ok(format!("rpcap (experimental): {msg}")),
+                Err(e) => ws.flash_err(format!("rpcap (experimental): {e:#}")),
             }
         } else {
             ws.flash_err("usage: rpcap host[:port] [iface]");
@@ -1137,10 +1458,69 @@ fn run_palette_command(ws: &mut Workspace, cmd: &str, fan_tx: &FanTx) {
     } else if cmd == "oauth" {
         // Handled async below via spawn — sync start here
         start_oauth_flow(ws);
+    } else if cmd == "fuzz" {
+        ws.overlay = Overlay::Fuzz;
+        ws.flash_ok("F11/fuzz — Enter mutates composer and sends (stream/listen)");
     } else if let Some(rest) = cmd.strip_prefix("pre-script ") {
         if let Some(SessionSlot::Http(s)) = ws.active_session_mut() {
             s.pre_script = rest.to_string();
             ws.flash_ok("pre-script set (Rhai)");
+        } else {
+            ws.flash_err("need HTTP session");
+        }
+    } else if cmd == "pre-script" || cmd == "pre-script-show" {
+        if let Some(SessionSlot::Http(s)) = ws.active_session() {
+            ws.edit_ta = textarea_util::multi_line(&s.pre_script);
+            ws.overlay = Overlay::PreScriptEdit;
+        } else {
+            ws.flash_err("need HTTP session");
+        }
+    } else if cmd == "pre-script-clear" {
+        if let Some(SessionSlot::Http(s)) = ws.active_session_mut() {
+            s.pre_script.clear();
+            ws.flash_ok("pre-script cleared");
+        } else {
+            ws.flash_err("need HTTP session");
+        }
+    } else if let Some(rest) = cmd.strip_prefix("test ") {
+        if let Some(SessionSlot::Http(s)) = ws.active_session_mut() {
+            let expr = rest.trim().to_string();
+            if expr.is_empty() {
+                ws.flash_err("usage: test EXPR");
+            } else {
+                s.tests.push(crate::http::RequestTest { expr: expr.clone() });
+                ws.flash_ok(format!("test added: {expr}"));
+            }
+        } else {
+            ws.flash_err("need HTTP session");
+        }
+    } else if cmd == "tests" {
+        if let Some(SessionSlot::Http(s)) = ws.active_session() {
+            let text = s
+                .tests
+                .iter()
+                .map(|t| t.expr.as_str())
+                .collect::<Vec<_>>()
+                .join("\n");
+            ws.edit_ta = textarea_util::multi_line(&text);
+            ws.overlay = Overlay::TestsEdit;
+        } else {
+            ws.flash_err("need HTTP session");
+        }
+    } else if cmd == "test-clear" {
+        if let Some(SessionSlot::Http(s)) = ws.active_session_mut() {
+            s.tests.clear();
+            s.last_assert.clear();
+            ws.flash_ok("tests cleared");
+        } else {
+            ws.flash_err("need HTTP session");
+        }
+    } else if let Some(rest) = cmd.strip_prefix("grpc-reply ") {
+        let reply = rest.trim().to_string();
+        if let Some(SessionSlot::Http(s)) = ws.active_session_mut() {
+            s.grpc_reply_type = reply.clone();
+            s.grpc_mode = true;
+            ws.flash_ok(format!("grpc reply type → {reply}"));
         } else {
             ws.flash_err("need HTTP session");
         }
@@ -1184,6 +1564,43 @@ fn start_oauth_flow(ws: &mut Workspace) {
         ws.flash_err("oauth: set Auth User=client_id, Pass=secret, Key=auth_url, Value=token_url");
         return;
     }
+    // Prefer refresh when we already have a stored refresh token for this client.
+    let store = crate::http::load_oauth_store();
+    if !store.refresh_token.is_empty()
+        && (store.client_id.is_empty() || store.client_id == cfg.client_id)
+    {
+        let cfg_r = cfg.clone();
+        let refresh = store.refresh_token.clone();
+        let result = std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("oauth rt");
+            rt.block_on(crate::http::refresh_access_token(
+                &cfg_r.token_url,
+                &cfg_r.client_id,
+                &cfg_r.client_secret,
+                &refresh,
+            ))
+        })
+        .join();
+        if let Ok(Ok(tok)) = result {
+            if let Some(SessionSlot::Http(s)) = ws.active_session_mut() {
+                textarea_util::set_text(&mut s.auth_token_ta, &tok.access_token);
+                s.auth = crate::http::AuthKind::OAuth2;
+                let mut store = crate::http::load_oauth_store();
+                store.access_token = tok.access_token;
+                if !tok.refresh_token.is_empty() {
+                    store.refresh_token = tok.refresh_token;
+                }
+                store.client_id = cfg.client_id.clone();
+                store.token_url = cfg.token_url.clone();
+                let _ = crate::http::save_oauth_store(&store);
+                ws.flash_ok("oauth: refreshed access token");
+                return;
+            }
+        }
+    }
     let listener = match std::net::TcpListener::bind(("127.0.0.1", 0)) {
         Ok(l) => l,
         Err(e) => {
@@ -1200,7 +1617,9 @@ fn start_oauth_flow(ws: &mut Workspace) {
     };
     drop(listener);
     let state = format!("bb{}", port);
-    let url = crate::http::authorize_url(&cfg, port, &state);
+    let verifier = crate::http::generate_pkce_verifier();
+    let challenge = crate::http::pkce_challenge_s256(&verifier);
+    let url = crate::http::authorize_url(&cfg, port, &state, &challenge);
     if let Err(e) = crate::http::open_browser(&url) {
         ws.flash_err(format!("open browser: {e:#}"));
         return;
@@ -1215,12 +1634,13 @@ fn start_oauth_flow(ws: &mut Workspace) {
     };
     let cfg2 = cfg.clone();
     let code2 = code.clone();
+    let verifier2 = verifier.clone();
     let result = std::thread::spawn(move || {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .expect("oauth rt");
-        rt.block_on(crate::http::exchange_code(&cfg2, port, &code2))
+        rt.block_on(crate::http::exchange_code(&cfg2, port, &code2, &verifier2))
     })
     .join();
     match result {
@@ -1228,32 +1648,20 @@ fn start_oauth_flow(ws: &mut Workspace) {
             if let Some(SessionSlot::Http(s)) = ws.active_session_mut() {
                 textarea_util::set_text(&mut s.auth_token_ta, &tok.access_token);
                 s.auth = crate::http::AuthKind::OAuth2;
-                let _ = save_oauth_refresh(&tok.refresh_token);
+                let mut store = crate::http::load_oauth_store();
+                if !tok.refresh_token.is_empty() {
+                    store.refresh_token = tok.refresh_token;
+                }
+                store.access_token = tok.access_token;
+                store.client_id = cfg.client_id;
+                store.token_url = cfg.token_url;
+                let _ = crate::http::save_oauth_store(&store);
                 ws.flash_ok("oauth: access token stored");
             }
         }
         Ok(Err(e)) => ws.flash_err(format!("token exchange: {e:#}")),
         Err(_) => ws.flash_err("oauth: exchange thread panicked"),
     }
-}
-
-fn save_oauth_refresh(refresh: &str) -> anyhow::Result<()> {
-    if refresh.is_empty() {
-        return Ok(());
-    }
-    let dir = dirs::config_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join("bitbeak");
-    std::fs::create_dir_all(&dir)?;
-    let path = dir.join("oauth.toml");
-    let body = format!("refresh_token = \"{}\"\n", refresh.replace('"', "\\\""));
-    std::fs::write(&path, body)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
-    }
-    Ok(())
 }
 
 async fn handle_mouse(ws: &mut Workspace, m: MouseEvent, fan_tx: &FanTx) -> Result<bool> {
@@ -1322,6 +1730,13 @@ async fn dispatch_hit(ws: &mut Workspace, target: HitTarget, fan_tx: &FanTx) -> 
             ws.new_session_cursor = kind;
             ws.begin_uri_entry(kind);
         }
+        HitTarget::CollectionRow(i) => {
+            if ws.collection_show_requests {
+                ws.request_cursor = i;
+            } else {
+                ws.collection_cursor = i;
+            }
+        }
         HitTarget::OverlayDismiss => {
             ws.overlay = Overlay::None;
         }
@@ -1366,7 +1781,6 @@ fn set_active_focus(ws: &mut Workspace, focus: PaneFocus) {
         Some(SessionSlot::Proxy(s)) => s.set_focus(focus),
         Some(SessionSlot::Diag(s)) => s.set_focus(focus),
         Some(SessionSlot::Capture(s)) => s.focus = focus,
-        Some(SessionSlot::Mock(s)) => s.focus = focus,
         None => {}
     }
 }
@@ -1377,7 +1791,6 @@ fn set_inspect(ws: &mut Workspace, mode: InspectMode) {
         Some(SessionSlot::Listen(s)) => s.inspect = mode,
         Some(SessionSlot::Proxy(s)) => s.inspect = mode,
         Some(SessionSlot::Http(s)) => s.inspect = mode,
-        Some(SessionSlot::Mock(s)) => s.inspect = mode,
         _ => {}
     }
 }
@@ -1427,11 +1840,6 @@ fn select_log_row(ws: &mut Workspace, i: usize) {
                 s.tree_selected = 0;
             }
         }
-        Some(SessionSlot::Mock(s)) if i < s.frames.len() => {
-            s.selected = i;
-            s.follow = i + 1 >= s.frames.len();
-        }
-        Some(SessionSlot::Mock(_)) => {}
         None => {}
     }
 }
@@ -1440,8 +1848,8 @@ fn is_typing(ws: &Workspace) -> bool {
     match ws.active_session() {
         Some(SessionSlot::Stream(s)) => s.focus == PaneFocus::Composer,
         Some(SessionSlot::Listen(s)) => s.focus == PaneFocus::Composer,
+        Some(SessionSlot::Proxy(s)) => s.focus == PaneFocus::Composer,
         Some(SessionSlot::Http(s)) => s.focus == PaneFocus::Form,
-        Some(SessionSlot::Mock(s)) => s.focus == PaneFocus::Form,
         _ => false,
     }
 }
@@ -1488,6 +1896,13 @@ async fn handle_typing(ws: &mut Workspace, key: KeyEvent) -> bool {
                 textarea_util::input(&mut s.composer, key);
             }
         }
+        Some(SessionSlot::Proxy(s)) if s.focus == PaneFocus::Composer => {
+            if key.code == KeyCode::Enter && !shift {
+                s.send_composer();
+            } else {
+                textarea_util::input(&mut s.composer, key);
+            }
+        }
         Some(SessionSlot::Http(s)) => {
             if s.focus == PaneFocus::History {
                 match key.code {
@@ -1526,8 +1941,14 @@ async fn handle_typing(ws: &mut Workspace, key: KeyEvent) -> bool {
                 }
             } else if s.field == HttpField::Form && s.focus == PaneFocus::Form {
                 match key.code {
-                    KeyCode::Char('a') if !ctrl && !shift => s.form_add_row(),
-                    KeyCode::Char('d') if !ctrl && !shift => s.form_delete_row(),
+                    KeyCode::Char('n') if ctrl => s.form_add_row(),
+                    KeyCode::Char('x') if ctrl => s.form_delete_row(),
+                    KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::ALT) => {
+                        s.form_add_row()
+                    }
+                    KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::ALT) => {
+                        s.form_delete_row()
+                    }
                     KeyCode::BackTab => {
                         s.form_cell = match s.form_cell {
                             crate::session::FormCell::Key => {
@@ -1578,52 +1999,6 @@ async fn handle_typing(ws: &mut Workspace, key: KeyEvent) -> bool {
                 textarea_util::input(ta, key);
             }
         }
-        Some(SessionSlot::Mock(s)) if s.focus == PaneFocus::Form => {
-            use crate::session::MockRouteCell;
-            match key.code {
-                KeyCode::Char('a') if !ctrl && !shift => s.route_add_row(),
-                KeyCode::Char('d') if !ctrl && !shift => s.route_delete_row(),
-                KeyCode::BackTab => {
-                    s.route_cell = match s.route_cell {
-                        MockRouteCell::Method => MockRouteCell::Latency,
-                        MockRouteCell::Path => MockRouteCell::Method,
-                        MockRouteCell::Status => MockRouteCell::Path,
-                        MockRouteCell::Body => MockRouteCell::Status,
-                        MockRouteCell::Latency => MockRouteCell::Body,
-                    };
-                }
-                KeyCode::Tab => {
-                    s.route_cell = match s.route_cell {
-                        MockRouteCell::Method => MockRouteCell::Path,
-                        MockRouteCell::Path => MockRouteCell::Body,
-                        MockRouteCell::Body => MockRouteCell::Status,
-                        MockRouteCell::Status => MockRouteCell::Latency,
-                        MockRouteCell::Latency => MockRouteCell::Method,
-                    };
-                }
-                KeyCode::Up => {
-                    s.commit_route_editor_to_row();
-                    s.route_row = s.route_row.saturating_sub(1);
-                    s.sync_route_editor_from_row();
-                }
-                KeyCode::Down => {
-                    s.commit_route_editor_to_row();
-                    let len = s.routes_snapshot().len();
-                    if s.route_row + 1 < len {
-                        s.route_row += 1;
-                    }
-                    s.sync_route_editor_from_row();
-                }
-                KeyCode::Enter => {
-                    textarea_util::input(s.active_route_textarea_mut(), key);
-                    s.commit_route_editor_to_row();
-                }
-                _ => {
-                    textarea_util::input(s.active_route_textarea_mut(), key);
-                    s.commit_route_editor_to_row();
-                }
-            }
-        }
         _ => {}
     }
 
@@ -1650,10 +2025,8 @@ async fn send_or_http(ws: &mut Workspace) {
     match ws.active_session_mut() {
         Some(SessionSlot::Stream(s)) => s.send_composer(),
         Some(SessionSlot::Listen(s)) => s.send_composer(),
-        Some(SessionSlot::Http(_)) => {
-            // reborrow via helper
-        }
-        Some(SessionSlot::Mock(_)) => {}
+        Some(SessionSlot::Proxy(s)) => s.send_composer(),
+        Some(SessionSlot::Http(_)) => {}
         _ => {}
     }
     if matches!(ws.active_session(), Some(SessionSlot::Http(_))) {
@@ -1668,8 +2041,11 @@ fn blur_focus(ws: &mut Workspace) {
             s.focus = PaneFocus::Log;
             s.sync_composer_style();
         }
+        Some(SessionSlot::Proxy(s)) => s.set_focus(PaneFocus::Log),
         Some(SessionSlot::Http(s)) => s.set_focus(PaneFocus::Log),
-        Some(SessionSlot::Mock(s)) => s.set_focus(PaneFocus::Log),
+        Some(SessionSlot::Capture(s)) => {
+            s.focus = PaneFocus::Log;
+        }
         _ => {}
     }
 }
@@ -1762,11 +2138,21 @@ fn cycle_focus(ws: &mut Workspace, reverse: bool) {
                 }
             };
         }
-        Some(SessionSlot::Mock(s)) => {
-            s.focus = match s.focus {
-                PaneFocus::Log => PaneFocus::Form,
-                _ => PaneFocus::Log,
+        Some(SessionSlot::Proxy(s)) => {
+            s.focus = if reverse {
+                match s.focus {
+                    PaneFocus::Log => PaneFocus::Composer,
+                    PaneFocus::Inspector => PaneFocus::Log,
+                    _ => PaneFocus::Inspector,
+                }
+            } else {
+                match s.focus {
+                    PaneFocus::Log => PaneFocus::Inspector,
+                    PaneFocus::Inspector => PaneFocus::Composer,
+                    _ => PaneFocus::Log,
+                }
             };
+            s.sync_composer_style();
         }
         _ => {}
     }
@@ -1818,10 +2204,6 @@ fn nav(ws: &mut Workspace, delta: isize) {
             let len = s.lines.len();
             crate::session::move_selection(&mut s.selected, &mut s.follow, len, delta);
         }
-        Some(SessionSlot::Mock(s)) => {
-            let len = s.frames.len();
-            crate::session::move_selection(&mut s.selected, &mut s.follow, len, delta);
-        }
         Some(SessionSlot::Capture(s)) => {
             if s.focus == PaneFocus::Tree {
                 let idx = s.filtered_indices();
@@ -1862,9 +2244,6 @@ fn nav_home(ws: &mut Workspace) {
         Some(SessionSlot::Diag(s)) => {
             crate::session::jump_top(&mut s.selected, &mut s.follow);
         }
-        Some(SessionSlot::Mock(s)) => {
-            crate::session::jump_top(&mut s.selected, &mut s.follow);
-        }
         Some(SessionSlot::Capture(s)) => {
             if s.focus == PaneFocus::Tree {
                 s.tree_selected = 0;
@@ -1895,10 +2274,6 @@ fn nav_end(ws: &mut Workspace) {
         }
         Some(SessionSlot::Diag(s)) => {
             let len = s.lines.len();
-            crate::session::jump_bottom(&mut s.selected, &mut s.follow, len);
-        }
-        Some(SessionSlot::Mock(s)) => {
-            let len = s.frames.len();
             crate::session::jump_bottom(&mut s.selected, &mut s.follow, len);
         }
         Some(SessionSlot::Capture(s)) => {
@@ -1999,6 +2374,7 @@ async fn action_replay_or_run(ws: &mut Workspace, fan_tx: &FanTx) {
         Some(SessionSlot::Http(_)) => {}
         Some(SessionSlot::Diag(s)) => s.run_now().await,
         Some(SessionSlot::Listen(s)) => s.send_composer(),
+        Some(SessionSlot::Proxy(s)) => s.send_composer(),
         _ => {}
     }
     if matches!(ws.active_session(), Some(SessionSlot::Http(_))) {
@@ -2052,12 +2428,8 @@ fn run_fuzz_once(ws: &mut Workspace) {
 }
 
 fn export_pcap(ws: &mut Workspace) {
-    if let Some(SessionSlot::Capture(s)) = ws.active_session() {
-        let path = s.default_save_path();
-        match s.save_displayed(&path) {
-            Ok(()) => ws.flash_ok(format!("saved {}", path.display())),
-            Err(e) => ws.flash_err(format!("save: {e:#}")),
-        }
+    if matches!(ws.active_session(), Some(SessionSlot::Capture(_))) {
+        save_capture(ws, None, false);
         return;
     }
 
@@ -2076,6 +2448,29 @@ fn export_pcap(ws: &mut Workspace) {
     match write_frames_pcap(&path, &frames, src, dst) {
         Ok(()) => ws.flash_ok(format!("pcap written {}", path.display())),
         Err(e) => ws.flash_err(format!("pcap error: {e:#}")),
+    }
+}
+
+fn save_capture(ws: &mut Workspace, path: Option<&str>, all: bool) {
+    let Some(SessionSlot::Capture(s)) = ws.active_session() else {
+        ws.flash_err("need capture session");
+        return;
+    };
+    let path_buf = path
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| s.default_save_path());
+    let result = if all {
+        s.save_all(&path_buf)
+    } else {
+        s.save_displayed(&path_buf)
+    };
+    match result {
+        Ok(()) => ws.flash_ok(format!(
+            "saved {} ({})",
+            path_buf.display(),
+            if all { "all" } else { "displayed" }
+        )),
+        Err(e) => ws.flash_err(format!("save: {e:#}")),
     }
 }
 
@@ -2367,6 +2762,8 @@ mod tests {
             Overlay::Hierarchy,
             Overlay::Expert,
             Overlay::Keylog,
+            Overlay::TestsEdit,
+            Overlay::PreScriptEdit,
         ] {
             ws.overlay = overlay;
             let _ = ui::draw_test(&mut ws, 80, 24);
@@ -2427,5 +2824,242 @@ mod tests {
         let col = crate::collections::import::import_path(&oas).unwrap();
         assert_eq!(col.name, "DemoAPI");
         assert!(col.requests.iter().any(|r| r.target.contains("/health")));
+    }
+
+    fn screen_of(term: &ratatui::Terminal<ratatui::backend::TestBackend>) -> String {
+        let buf = term.backend().buffer();
+        let mut screen = String::new();
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                screen.push_str(buf[(x, y)].symbol());
+            }
+            screen.push('\n');
+        }
+        screen
+    }
+
+    fn line_after_label(screen: &str, label: &str) -> Option<String> {
+        let clean = |line: &str| -> String {
+            line.replace(['│', '┌', '┐', '└', '┘', '─'], "")
+                .trim()
+                .to_string()
+        };
+        let mut lines = screen.lines();
+        while let Some(line) = lines.next() {
+            if clean(line).split_whitespace().next() == Some(label) {
+                return lines.next().map(|s| {
+                    clean(s)
+                        .split_whitespace()
+                        .next()
+                        .unwrap_or_default()
+                        .to_string()
+                });
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn http_cli_target_shows_method_and_url() {
+        let args = Args::parse_from(["bitbeak", "http://bitbeak.test/unique-cli-path-xyz"]);
+        let mut ws = Workspace::new(&args).unwrap();
+        let term = ui::draw_test(&mut ws, 120, 36);
+        let screen = screen_of(&term);
+        assert_eq!(
+            line_after_label(&screen, "Method").as_deref(),
+            Some("GET"),
+            "method value missing:\n{screen}"
+        );
+        let url_line = line_after_label(&screen, "URL").expect("URL label");
+        assert!(
+            url_line.contains("http://bitbeak.test/unique-cli-path-xyz"),
+            "url value missing from field (got {url_line:?}):\n{screen}"
+        );
+    }
+
+    #[test]
+    fn collection_hydrates_matching_http_request() {
+        let args = Args::parse_from(["bitbeak", "http://127.0.0.1:18081/v1/orders/ord_8f2c91a4"]);
+        let mut ws = Workspace::new(&args).unwrap();
+        let mut col = crate::collections::Collection::new("kestrel");
+        col.requests.push(crate::collections::SavedRequest {
+            name: "Get order".into(),
+            kind: "http".into(),
+            target: "http://127.0.0.1:18081/v1/orders/ord_8f2c91a4".into(),
+            method: Some("GET".into()),
+            headers: vec![("Accept".into(), "application/json".into())],
+            body: String::new(),
+            auth: crate::http::AuthKind::Bearer,
+            auth_token: "sk_test".into(),
+            ..Default::default()
+        });
+        ws.collection = Some(col.clone());
+        ws.hydrate_http_from_collection();
+        match ws.active_session() {
+            Some(SessionSlot::Http(s)) => {
+                assert_eq!(s.auth, crate::http::AuthKind::Bearer);
+                assert_eq!(textarea_util::text_of(&s.auth_token_ta), "sk_test");
+                assert!(textarea_util::text_of(&s.headers).contains("application/json"));
+                assert_eq!(
+                    textarea_util::text_of(&s.url),
+                    "http://127.0.0.1:18081/v1/orders/ord_8f2c91a4"
+                );
+            }
+            _ => panic!("expected HTTP session"),
+        }
+    }
+
+    #[test]
+    fn collection_without_url_opens_first_request() {
+        let args = Args::parse_from(["bitbeak"]);
+        let mut ws = Workspace::new(&args).unwrap();
+        let mut col = crate::collections::Collection::new("kestrel");
+        col.requests.push(crate::collections::SavedRequest {
+            name: "Readiness".into(),
+            kind: "http".into(),
+            target: "http://127.0.0.1:18081/readyz".into(),
+            method: Some("GET".into()),
+            headers: vec![],
+            body: String::new(),
+            ..Default::default()
+        });
+        ws.collection = Some(col.clone());
+        ws.hydrate_http_from_collection();
+        match ws.active_session() {
+            Some(SessionSlot::Http(s)) => {
+                assert_eq!(
+                    textarea_util::text_of(&s.url),
+                    "http://127.0.0.1:18081/readyz"
+                );
+                assert_eq!(textarea_util::text_of(&s.method), "GET");
+            }
+            _ => panic!("expected HTTP session"),
+        }
+    }
+
+    #[test]
+    fn new_session_uri_prefills_and_shows_defaults() {
+        for kind in 0..=6u8 {
+            let kind = kind as usize;
+            let (a, b) = Workspace::uri_defaults(kind);
+            let args = Args::parse_from(["bitbeak"]);
+            let mut ws = Workspace::new(&args).unwrap();
+            ws.begin_uri_entry(kind);
+            if kind == 6 {
+                assert!(textarea_util::text_of(&ws.uri_input).is_empty());
+            } else {
+                assert_eq!(textarea_util::text_of(&ws.uri_input), a, "kind {kind}");
+            }
+            let term = ui::draw_test(&mut ws, 80, 24);
+            let screen = ui::screen_text(&term);
+            if kind == 6 {
+                assert!(
+                    screen.contains("/path/to/capture.pcapng"),
+                    "pcap placeholder missing:\n{screen}"
+                );
+            } else {
+                assert!(
+                    screen.contains(a),
+                    "kind {kind} default {a:?} clipped/missing:\n{screen}"
+                );
+            }
+            if !b.is_empty() {
+                assert!(
+                    screen.contains(b),
+                    "kind {kind} upstream {b:?} clipped/missing:\n{screen}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn stream_and_listen_composer_keep_payload_visible() {
+        let payload = "bb-composer-ping-xyz";
+        let args = Args::parse_from(["bitbeak"]);
+        let mut ws = Workspace::new(&args).unwrap();
+        let mut stream = crate::session::StreamSession::inert(
+            crate::cli::Target::Tcp {
+                host: "127.0.0.1".into(),
+                port: 9,
+            },
+            crate::framing::FramingConfig::default(),
+            100,
+        );
+        let _ = stream.take_io_rx();
+        textarea_util::set_text(&mut stream.composer, payload);
+        stream.focus = crate::session::PaneFocus::Composer;
+        ws.sessions.push(SessionSlot::Stream(stream));
+
+        let mut listen = crate::session::ListenSession::inert(
+            crate::cli::Target::Tcp {
+                host: "127.0.0.1".into(),
+                port: 9,
+            },
+            crate::framing::FramingConfig::default(),
+            100,
+        );
+        let _ = listen.take_io_rx();
+        textarea_util::set_text(&mut listen.composer, payload);
+        ws.sessions.push(SessionSlot::Listen(listen));
+
+        for active in [0usize, 1] {
+            ws.active = active;
+            for (w, h) in [(80, 24), (60, 18)] {
+                let term = ui::draw_test(&mut ws, w, h);
+                let screen = ui::screen_text(&term);
+                assert!(
+                    screen.contains(payload),
+                    "session {active} {w}x{h} composer clipped:\n{screen}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn filter_and_palette_show_typed_input() {
+        let args = Args::parse_from(["bitbeak"]);
+        let mut ws = Workspace::new(&args).unwrap();
+        textarea_util::set_text(&mut ws.filter_input, "bb-filt-xyz");
+        ws.overlay = Overlay::Filter;
+        let screen = ui::screen_text(&ui::draw_test(&mut ws, 80, 24));
+        assert!(
+            screen.contains("bb-filt-xyz"),
+            "filter input clipped:\n{screen}"
+        );
+
+        textarea_util::set_text(&mut ws.palette_input, "bb-pal-xyz");
+        ws.overlay = Overlay::CommandPalette;
+        let screen = ui::screen_text(&ui::draw_test(&mut ws, 80, 24));
+        assert!(
+            screen.contains("bb-pal-xyz"),
+            "palette input clipped:\n{screen}"
+        );
+    }
+
+    #[test]
+    fn capture_and_diag_empty_states_are_labeled() {
+        let args = Args::parse_from(["bitbeak"]);
+        let mut ws = Workspace::new(&args).unwrap();
+        ws.sessions.push(SessionSlot::Capture(
+            crate::session::CaptureSession::new_live("any", 100),
+        ));
+        let screen = ui::screen_text(&ui::draw_test(&mut ws, 100, 30));
+        assert!(
+            screen.contains("waiting for packets") || screen.contains("not started"),
+            "capture empty hint missing:\n{screen}"
+        );
+
+        ws.sessions.clear();
+        ws.sessions
+            .push(SessionSlot::Diag(crate::session::DiagSession::new(
+                crate::cli::DiagSpec::Dns {
+                    host: "example.com".into(),
+                },
+            )));
+        let screen = ui::screen_text(&ui::draw_test(&mut ws, 80, 24));
+        assert!(
+            screen.contains("running diagnose") || screen.contains("DNS example.com"),
+            "diag default missing:\n{screen}"
+        );
     }
 }

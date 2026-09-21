@@ -275,4 +275,24 @@ mod tests {
         assert_eq!(&pkt.data[..], &[0xaa, 0xbb, 0xcc, 0xdd]);
         assert_eq!(pkt.orig_len, 4);
     }
+
+    #[test]
+    fn probe_against_local_stub() {
+        use std::net::TcpListener;
+        use std::thread;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let handle = thread::spawn(move || {
+            let (mut sock, _) = listener.accept().unwrap();
+            let mut hdr = [0u8; 8];
+            sock.read_exact(&mut hdr).unwrap();
+            // Reply as FINDALLIF reply (0x80 | 2) with empty body.
+            let reply = encode_header(MSG_FINDALLIF_REQ | 0x80, 0, 0);
+            sock.write_all(&reply).unwrap();
+        });
+        let msg = probe("127.0.0.1", port).unwrap();
+        assert!(msg.contains("rpcap://127.0.0.1"), "{msg}");
+        handle.join().unwrap();
+    }
 }

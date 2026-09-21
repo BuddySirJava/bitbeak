@@ -9,8 +9,8 @@ use crate::cli::{Args, DiagSpec, Target};
 use crate::collections::Collection;
 use crate::framing::FramingConfig;
 use crate::session::{
-    default_routes, load_routes, CaptureSession, ConnStatus, DiagSession, HttpSession,
-    ListenSession, MockSession, ProxySession, SessionKind, SessionView, StreamSession,
+    CaptureSession, ConnStatus, DiagSession, HttpSession, ListenSession, ProxySession, SessionKind,
+    SessionView, StreamSession,
 };
 use crate::transport::IoRx;
 use crate::ui::hitmap::HitMap;
@@ -24,7 +24,6 @@ pub enum SessionSlot {
     Proxy(ProxySession),
     Diag(DiagSession),
     Capture(CaptureSession),
-    Mock(MockSession),
 }
 
 impl SessionSlot {
@@ -36,7 +35,6 @@ impl SessionSlot {
             Self::Proxy(_) => SessionKind::Proxy,
             Self::Diag(_) => SessionKind::Diag,
             Self::Capture(s) => s.kind(),
-            Self::Mock(s) => s.kind(),
         }
     }
 
@@ -48,7 +46,6 @@ impl SessionSlot {
             Self::Proxy(s) => s.title(),
             Self::Diag(s) => s.title(),
             Self::Capture(s) => s.title(),
-            Self::Mock(s) => s.title(),
         }
     }
 
@@ -60,7 +57,6 @@ impl SessionSlot {
             Self::Proxy(s) => s.status,
             Self::Diag(s) => s.status,
             Self::Capture(s) => s.status,
-            Self::Mock(s) => s.status,
         }
     }
 
@@ -81,7 +77,6 @@ impl SessionSlot {
             Self::Proxy(s) => s.bind.display(),
             Self::Diag(s) => DiagSession::title_for(&s.spec),
             Self::Capture(s) => s.title_iface.clone(),
-            Self::Mock(s) => s.bind.clone(),
         };
         let short = middle_truncate(&target, 18);
         let dot = if self.is_live() { "●" } else { "○" };
@@ -93,7 +88,6 @@ impl SessionSlot {
             Self::Stream(s) => s.take_io_rx(),
             Self::Listen(s) => s.take_io_rx(),
             Self::Proxy(s) => s.take_io_rx(),
-            Self::Mock(s) => s.take_io_rx(),
             _ => None,
         }
     }
@@ -106,7 +100,6 @@ impl SessionSlot {
             Self::Http(s) => s.on_io(event),
             Self::Diag(s) => s.on_io(event),
             Self::Capture(_) => {}
-            Self::Mock(s) => s.on_io(event),
         }
     }
 
@@ -122,7 +115,6 @@ impl SessionSlot {
             Self::Proxy(s) => s.status_message(),
             Self::Diag(s) => s.status_message(),
             Self::Capture(s) => &s.status_msg,
-            Self::Mock(s) => &s.status_msg,
         }
     }
 
@@ -134,7 +126,6 @@ impl SessionSlot {
             Self::Proxy(s) => s.frames.len(),
             Self::Diag(s) => s.lines.len(),
             Self::Capture(s) => s.store.len(),
-            Self::Mock(s) => s.frames.len(),
         }
     }
 
@@ -146,7 +137,6 @@ impl SessionSlot {
             Self::Proxy(s) => s.target_display(),
             Self::Diag(s) => s.target_display(),
             Self::Capture(s) => s.title_iface.clone(),
-            Self::Mock(s) => s.bind.clone(),
         }
     }
 
@@ -158,7 +148,6 @@ impl SessionSlot {
             Self::Proxy(s) => &s.filter,
             Self::Diag(s) => &s.filter,
             Self::Capture(s) => &s.display_filter_str,
-            Self::Mock(_) => "",
         }
     }
 
@@ -172,22 +161,27 @@ impl SessionSlot {
             Self::Capture(s) => {
                 let _ = s.set_display_filter(&q);
             }
-            Self::Mock(_) => {}
         }
     }
 }
 
 fn middle_truncate(s: &str, max: usize) -> String {
-    if s.len() <= max {
+    let chars: Vec<char> = s.chars().collect();
+    if chars.len() <= max {
         return s.to_string();
     }
     if max < 4 {
-        return s.chars().take(max).collect();
+        return chars.into_iter().take(max).collect();
     }
     let keep = max - 1;
     let head = keep / 2;
     let tail = keep - head;
-    format!("{}…{}", &s[..head], &s[s.len() - tail..])
+    let n = chars.len();
+    format!(
+        "{}…{}",
+        chars[..head].iter().collect::<String>(),
+        chars[n - tail..].iter().collect::<String>()
+    )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -214,6 +208,10 @@ pub enum Overlay {
     Hierarchy,
     Expert,
     Keylog,
+    /// Multi-line editor for HttpSession.tests (one expr per line).
+    TestsEdit,
+    /// Multi-line editor for HttpSession.pre_script.
+    PreScriptEdit,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -254,6 +252,10 @@ pub struct Workspace {
     pub pcap_path: Option<std::path::PathBuf>,
     pub hitmap: HitMap,
     pub tick: u64,
+    /// Shared multi-line editor for TestsEdit / PreScriptEdit overlays.
+    pub edit_ta: TextArea<'static>,
+    /// When opening a proxy via F2 URI form, enable TLS intercept / MITM.
+    pub uri_tls_intercept: bool,
 }
 
 impl Workspace {
@@ -288,6 +290,8 @@ impl Workspace {
             pcap_path: args.pcap.clone(),
             hitmap: HitMap::default(),
             tick: 0,
+            edit_ta: textarea_util::multi_line(""),
+            uri_tls_intercept: false,
         };
 
         if let Some(name) = &args.collection {
@@ -313,14 +317,18 @@ impl Workspace {
                 let _ = cap.enable_ring(dir, args.ring_size, args.ring_files);
             }
             if let Some(kl) = &args.keylog {
-                let _ = cap.load_keylog(kl);
+                if let Err(e) = cap.load_keylog(kl) {
+                    ws.flash_err(format!("keylog: {e:#}"));
+                }
             }
             ws.sessions.push(SessionSlot::Capture(cap));
         } else if let Some(path) = &args.open {
             match CaptureSession::open_file(path, args.max_frames) {
                 Ok(mut cap) => {
                     if let Some(kl) = &args.keylog {
-                        let _ = cap.load_keylog(kl);
+                        if let Err(e) = cap.load_keylog(kl) {
+                            ws.flash_err(format!("keylog: {e:#}"));
+                        }
                     }
                     ws.sessions.push(SessionSlot::Capture(cap));
                 }
@@ -358,7 +366,46 @@ impl Workspace {
             }
         }
 
+        ws.hydrate_http_from_collection();
         Ok(ws)
+    }
+
+    pub(crate) fn hydrate_http_from_collection(&mut self) {
+        let Some(col) = self.collection.clone() else {
+            return;
+        };
+        if let Some(SessionSlot::Http(s)) = self.active_session_mut() {
+            s.apply_collection(&col);
+            return;
+        }
+        if self.sessions.is_empty() {
+            if let Some(req) = col.requests.first() {
+                self.push_http_from_saved(&col, req);
+            }
+        }
+    }
+
+    fn push_http_from_saved(&mut self, col: &Collection, req: &crate::collections::SavedRequest) {
+        let url = {
+            let substituted = col.substitute(&req.target);
+            if substituted.trim().is_empty() {
+                "http://localhost/".to_string()
+            } else {
+                substituted
+            }
+        };
+        let secure = url.starts_with("https://");
+        let mut session = HttpSession::new(
+            Target::Http {
+                url: url.clone(),
+                secure,
+            },
+            self.max_frames,
+        );
+        session.load_saved(req);
+        textarea_util::set_text(&mut session.url, &url);
+        self.sessions.push(SessionSlot::Http(session));
+        self.active = self.sessions.len() - 1;
     }
 
     pub fn flash(&mut self, msg: impl Into<String>, kind: FlashKind) {
@@ -474,11 +521,15 @@ impl Workspace {
     }
 
     pub fn open_proxy(&mut self, bind: Target, upstream: Target) {
+        self.open_proxy_mitm(bind, upstream, self.uri_tls_intercept);
+    }
+
+    pub fn open_proxy_mitm(&mut self, bind: Target, upstream: Target, tls_intercept: bool) {
         self.sessions.push(SessionSlot::Proxy(ProxySession::start(
             bind,
             upstream,
             self.max_frames,
-            false,
+            tls_intercept,
         )));
         self.active = self.sessions.len() - 1;
         self.overlay = Overlay::None;
@@ -502,27 +553,40 @@ impl Workspace {
         Ok(())
     }
 
-    pub fn open_mock(&mut self, bind: Target) {
-        let bind_key = match &bind {
-            Target::Tcp { host, port } => format!("{host}:{port}"),
-            _ => "127.0.0.1:18080".into(),
-        };
-        let routes = load_routes(&bind_key).unwrap_or_else(default_routes);
-        self.sessions.push(SessionSlot::Mock(MockSession::start(
-            bind,
-            self.max_frames,
-            routes,
-        )));
-        self.active = self.sessions.len() - 1;
-        self.overlay = Overlay::None;
-    }
-
     pub fn begin_uri_entry(&mut self, kind: usize) {
-        self.uri_input = textarea_util::single_line("");
-        self.uri_input2 = textarea_util::single_line("");
+        let (a, b) = Self::uri_defaults(kind);
+        self.uri_input = textarea_util::single_line(a);
+        self.uri_input2 = textarea_util::single_line(b);
         self.uri_field = 0;
         textarea_util::style_focused(&mut self.uri_input);
         self.overlay = Overlay::NewSessionUri { kind };
+    }
+
+    /// Prefill so F2 is Enter-to-open instead of a blank form.
+    pub fn uri_defaults(kind: usize) -> (&'static str, &'static str) {
+        match kind {
+            0 => ("tcp://127.0.0.1:9090", ""),
+            1 => ("https://example.com/", ""),
+            2 => ("tcp://0.0.0.0:9090", ""),
+            3 => ("tcp://127.0.0.1:8080", "tcp://127.0.0.1:9090"),
+            4 => ("dns://example.com", ""),
+            5 => ("any", ""),
+            6 => ("", ""),
+            _ => ("", ""),
+        }
+    }
+
+    pub fn uri_placeholder(kind: usize) -> &'static str {
+        match kind {
+            0 => "tcp://127.0.0.1:9090",
+            1 => "https://example.com/",
+            2 => "tcp://0.0.0.0:9090",
+            3 => "tcp://127.0.0.1:8080",
+            4 => "dns://example.com",
+            5 => "eth0  |  en0  |  any",
+            6 => "/path/to/capture.pcapng",
+            _ => "",
+        }
     }
 
     pub fn uri_hint(kind: usize) -> &'static str {
@@ -530,16 +594,15 @@ impl Workspace {
             0 => "e.g. tcp://127.0.0.1:9090  unix:///tmp/app.sock  ws://host/path  tls://host:443",
             1 => "e.g. https://api.example.com/v1/health",
             2 => "e.g. tcp://0.0.0.0:9090  unix:///tmp/debug.sock",
-            3 => "bind URI (Tab for upstream)  e.g. tcp://127.0.0.1:8080",
+            3 => "bind URI · Tab upstream · Space/i toggle TLS intercept (MITM, HTTP/1.1 only)",
             4 => "e.g. dns://example.com  ping://8.8.8.8  tcp://host:443  tls://host:443",
             5 => "e.g. eth0  en0  any  (live capture on interface)",
             6 => "e.g. /path/to/capture.pcap  or  capture.pcapng",
-            7 => "e.g. tcp://127.0.0.1:18080  (mock HTTP server bind)",
             _ => "",
         }
     }
 
-    pub const NEW_KINDS: [&'static str; 8] = [
+    pub const NEW_KINDS: [&'static str; 7] = [
         "Stream (tcp/udp/unix/ws/tls URI)",
         "HTTP / HTTPS",
         "Listen (multi-client)",
@@ -547,6 +610,44 @@ impl Workspace {
         "Diagnose (dns/ping/tcp/tls)",
         "Capture (live iface)",
         "Open capture file",
-        "Mock HTTP server",
     ];
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cli::Target;
+    use crate::session::HttpSession;
+
+    #[test]
+    fn middle_truncate_ascii() {
+        assert_eq!(middle_truncate("short", 18), "short");
+        assert_eq!(
+            middle_truncate("http://127.0.0.1:18081/v1/orders/ord_8f2c91a4", 18)
+                .chars()
+                .count(),
+            18
+        );
+    }
+
+    #[test]
+    fn middle_truncate_multibyte_does_not_panic() {
+        let s = "http://exämple.com/路径/订单";
+        let out = middle_truncate(s, 18);
+        assert_eq!(out.chars().count(), 18);
+        assert!(out.contains('…'));
+    }
+
+    #[test]
+    fn unicode_http_tab_title_does_not_panic() {
+        let slot = SessionSlot::Http(HttpSession::new(
+            Target::Http {
+                url: "http://exämple.com/路径".into(),
+                secure: false,
+            },
+            10,
+        ));
+        let title = slot.short_tab(0);
+        assert!(title.contains("HTTP"));
+    }
 }

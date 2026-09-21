@@ -4,7 +4,7 @@
 
 # BitBeak
 
-**Interactive terminal inspector and full-suite network testing TUI.**
+**Keyboard network Swiss army knife** — HTTP, capture, streams, proxy, and probes in one TUI.
 
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg?style=flat-square)](LICENSE)
 [![Platform](https://img.shields.io/badge/Platform-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey.svg?style=flat-square)](#platform-support)
@@ -17,7 +17,7 @@
 
 ---
 
-HTTP client, packet capture, stream inspector, mock server, proxy tap, and DNS/ping/TLS probes in one keyboard-driven binary.
+HTTP client, packet capture, stream inspector, proxy tap, and DNS/ping/TLS probes in one keyboard-driven binary — blades that hand off (`: sniff` → follow → `r` replay), not a Postman/Wireshark/mitmproxy clone.
 
 ## Highlights
 
@@ -25,7 +25,7 @@ HTTP client, packet capture, stream inspector, mock server, proxy tap, and DNS/p
 * **HTTP / API workbench** — HTTP/1.1 and HTTP/2, GraphQL, unary gRPC, auth, cookies, history, and a timing waterfall.
 * **Live capture** — Linux `AF_PACKET` (TPACKET_V3 when the kernel supports it), macOS BPF, Windows Npcap.
 * **TLS / QUIC helpers** — dissect application data when an NSS-style `SSLKEYLOGFILE` is available.
-* **Mocks, listen, and proxy** — in-process HTTP mock with a live route editor, multi-client listen, and TCP tap.
+* **Listen and proxy** — multi-client listen and TCP tap.
 
 ## Key Features
 
@@ -38,12 +38,11 @@ HTTP client, packet capture, stream inspector, mock server, proxy tap, and DNS/p
   * Rhai pre-request scripts, cookie jar, request history, sequential bench (`F7`).
   * Timing waterfall: DNS, TCP handshake, TLS, TTFB.
 * **Capture & analysis**
-  * Live sniff, `pcap` / `pcapng` open/save, remote capture via `rpcap`.
+  * Live sniff, `pcap` / `pcapng` open/save; remote `rpcap` is **experimental**.
   * Capture filters (tcpdump subset) and display filters (Wireshark subset).
   * Protocol tree, follow TCP/UDP/HTTP, reassembly, TLS 1.2/1.3 and QUIC decrypt helpers.
   * Optional GeoIP (`GeoLite2-City.mmdb`) and Wireshark-style `manuf` OUI names.
-* **Diagnostics, mocks & tooling**
-  * Mock HTTP server with editable routes persisted under `~/.config/bitbeak/mocks/`.
+* **Diagnostics & tooling**
   * Multi-client listen and bidirectional TCP proxy / tap (`--tls-intercept` for local debug).
   * Diagnose: `dns://`, `ping://` (ICMP with TCP fallback), `tcp://`, `tls://`, `trace://`.
 * **Collections**

@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 use bytes::Bytes;
 
-use crate::dissect::packet::PacketRecord;
+use crate::dissect::packet::{LinkType, PacketRecord};
 
 #[derive(Debug, Clone)]
 pub struct FollowResult {
@@ -19,6 +19,11 @@ pub struct HttpObject {
     pub name: String,
     pub content_type: String,
     pub data: Bytes,
+    /// True when the message is an HTTP request (not a response).
+    pub is_request: bool,
+    pub method: String,
+    pub url: String,
+    pub headers: Vec<(String, String)>,
 }
 
 /// Follow TCP stream containing `selected` (4-tuple match, bidirectional).
@@ -156,30 +161,145 @@ pub fn extract_http_objects(raw: &[u8]) -> Vec<HttpObject> {
 }
 
 fn parse_http_message(msg: &str) -> Option<HttpObject> {
-    let (head, body) = msg.split_once("\r\n\r\n")?;
-    let first = head.lines().next()?;
+    let (head, body) = msg
+        .split_once("\r\n\r\n")
+        .or_else(|| msg.split_once("\n\n"))?;
+    let first = head.lines().next()?.trim();
+    if first.is_empty() {
+        return None;
+    }
     let name = first.chars().take(60).collect::<String>();
     let mut content_type = "application/octet-stream".to_string();
+    let mut headers = Vec::new();
     for line in head.lines().skip(1) {
         if let Some((k, v)) = line.split_once(':') {
-            if k.eq_ignore_ascii_case("content-type") {
-                content_type = v.trim().to_string();
+            let key = k.trim().to_string();
+            let val = v.trim().to_string();
+            if key.eq_ignore_ascii_case("content-type") {
+                content_type = val.clone();
             }
+            headers.push((key, val));
         }
     }
-    if body.is_empty() {
+    let is_request = !first.starts_with("HTTP/");
+    let (method, url) = if is_request {
+        let mut parts = first.split_whitespace();
+        let m = parts.next().unwrap_or("GET").to_string();
+        let path = parts.next().unwrap_or("/").to_string();
+        let host = headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case("host"))
+            .map(|(_, v)| v.clone())
+            .unwrap_or_default();
+        let url = if path.starts_with("http://") || path.starts_with("https://") {
+            path
+        } else if !host.is_empty() {
+            format!("http://{host}{path}")
+        } else {
+            path
+        };
+        (m, url)
+    } else {
+        (String::new(), String::new())
+    };
+    // Keep request objects even with empty body (GET).
+    if !is_request && body.is_empty() {
         return None;
     }
     Some(HttpObject {
         name,
         content_type,
         data: Bytes::copy_from_slice(body.as_bytes()),
+        is_request,
+        method,
+        url,
+        headers,
     })
+}
+
+/// Build a bpf/tcpdump-style capture filter from an HTTP(S) URL.
+pub fn capture_filter_for_url(url: &str) -> Option<String> {
+    let rest = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))?;
+    let is_https = url.starts_with("https://");
+    let hostport = rest.split('/').next()?.split('?').next()?;
+    let (host, port_opt) = if let Some(inner) = hostport.strip_prefix('[') {
+        let end = inner.find(']')?;
+        let host = inner[..end].to_string();
+        let port = inner[end + 1..]
+            .strip_prefix(':')
+            .and_then(|p| p.parse::<u16>().ok());
+        (host, port)
+    } else if let Some((h, p)) = hostport.rsplit_once(':') {
+        if p.chars().all(|c| c.is_ascii_digit()) {
+            (h.to_string(), p.parse().ok())
+        } else {
+            (hostport.to_string(), None)
+        }
+    } else {
+        (hostport.to_string(), None)
+    };
+    if host.is_empty() {
+        return None;
+    }
+    let default_port = if is_https { 443 } else { 80 };
+    let port = port_opt.unwrap_or(default_port);
+    if port == default_port {
+        Some(format!("host {host}"))
+    } else {
+        Some(format!("host {host} and port {port}"))
+    }
 }
 
 fn tcp_payload(p: &PacketRecord) -> Option<(u32, Bytes)> {
     let data = &p.data[..];
-    let ip_off = ipv4_payload_offset(data)?;
+    if let Some((seq, wire)) = tcp_payload_from_wire(data, p.link_type) {
+        if let Some(dec) = &p.decrypted {
+            return Some((seq, dec.clone()));
+        }
+        return Some((seq, wire));
+    }
+    // No L4 header (or non-IP) but decryptor filled application bytes.
+    p.decrypted.as_ref().map(|dec| (0u32, dec.clone()))
+}
+
+fn tcp_payload_from_wire(data: &[u8], link: LinkType) -> Option<(u32, Bytes)> {
+    let (ip_off, is_v6) = ip_payload_offset(data, link)?;
+    if is_v6 {
+        if data.len() < ip_off + 40 {
+            return None;
+        }
+        let mut next = data[ip_off + 6];
+        let mut hdr_off = ip_off + 40;
+        while matches!(next, 0 | 43 | 44 | 51 | 60) {
+            if data.len() < hdr_off + 2 {
+                return None;
+            }
+            next = data[hdr_off];
+            let hdr_len = (data[hdr_off + 1] as usize + 1) * 8;
+            hdr_off += hdr_len;
+        }
+        if next != 6 {
+            return None;
+        }
+        let tcp_off = hdr_off;
+        if data.len() < tcp_off + 20 {
+            return None;
+        }
+        let seq = u32::from_be_bytes([
+            data[tcp_off + 4],
+            data[tcp_off + 5],
+            data[tcp_off + 6],
+            data[tcp_off + 7],
+        ]);
+        let doff = ((data[tcp_off + 12] >> 4) as usize) * 4;
+        let payload_off = tcp_off + doff;
+        if payload_off > data.len() {
+            return None;
+        }
+        return Some((seq, Bytes::copy_from_slice(&data[payload_off..])));
+    }
     if data.len() < ip_off + 20 {
         return None;
     }
@@ -204,7 +324,40 @@ fn tcp_payload(p: &PacketRecord) -> Option<(u32, Bytes)> {
 
 fn udp_payload(p: &PacketRecord) -> Option<Bytes> {
     let data = &p.data[..];
-    let ip_off = ipv4_payload_offset(data)?;
+    if let Some(wire) = udp_payload_from_wire(data, p.link_type) {
+        if let Some(dec) = &p.decrypted {
+            return Some(dec.clone());
+        }
+        return Some(wire);
+    }
+    p.decrypted.clone()
+}
+
+fn udp_payload_from_wire(data: &[u8], link: LinkType) -> Option<Bytes> {
+    let (ip_off, is_v6) = ip_payload_offset(data, link)?;
+    if is_v6 {
+        if data.len() < ip_off + 40 {
+            return None;
+        }
+        let mut next = data[ip_off + 6];
+        let mut hdr_off = ip_off + 40;
+        while matches!(next, 0 | 43 | 44 | 51 | 60) {
+            if data.len() < hdr_off + 2 {
+                return None;
+            }
+            next = data[hdr_off];
+            let hdr_len = (data[hdr_off + 1] as usize + 1) * 8;
+            hdr_off += hdr_len;
+        }
+        if next != 17 {
+            return None;
+        }
+        let udp_off = hdr_off;
+        if data.len() < udp_off + 8 {
+            return None;
+        }
+        return Some(Bytes::copy_from_slice(&data[udp_off + 8..]));
+    }
     if data.len() < ip_off + 20 {
         return None;
     }
@@ -216,21 +369,76 @@ fn udp_payload(p: &PacketRecord) -> Option<Bytes> {
     Some(Bytes::copy_from_slice(&data[udp_off + 8..]))
 }
 
-fn ipv4_payload_offset(data: &[u8]) -> Option<usize> {
-    if data.len() < 14 {
-        return None;
-    }
-    // Assume Ethernet for follow helpers
-    let mut off = 14;
-    let mut et = u16::from_be_bytes([data[12], data[13]]);
-    if et == 0x8100 && data.len() >= 18 {
-        et = u16::from_be_bytes([data[16], data[17]]);
-        off = 18;
-    }
-    if et == 0x0800 {
-        Some(off)
-    } else {
-        None
+/// Returns (offset_to_IP_header, is_ipv6).
+fn ip_payload_offset(data: &[u8], link: LinkType) -> Option<(usize, bool)> {
+    match link {
+        LinkType::Ethernet | LinkType::Unknown(_) => {
+            if data.len() < 14 {
+                return None;
+            }
+            let mut off = 14;
+            let mut et = u16::from_be_bytes([data[12], data[13]]);
+            if et == 0x8100 && data.len() >= 18 {
+                et = u16::from_be_bytes([data[16], data[17]]);
+                off = 18;
+            }
+            match et {
+                0x0800 => Some((off, false)),
+                0x86dd => Some((off, true)),
+                _ => None,
+            }
+        }
+        LinkType::LinuxSll => {
+            if data.len() < 16 {
+                return None;
+            }
+            let et = u16::from_be_bytes([data[14], data[15]]);
+            match et {
+                0x0800 => Some((16, false)),
+                0x86dd => Some((16, true)),
+                _ => None,
+            }
+        }
+        LinkType::LinuxSll2 => {
+            if data.len() < 20 {
+                return None;
+            }
+            let et = u16::from_be_bytes([data[0], data[1]]);
+            match et {
+                0x0800 => Some((20, false)),
+                0x86dd => Some((20, true)),
+                _ => None,
+            }
+        }
+        LinkType::Raw => {
+            if data.is_empty() {
+                return None;
+            }
+            match data[0] >> 4 {
+                4 => Some((0, false)),
+                6 => Some((0, true)),
+                _ => None,
+            }
+        }
+        LinkType::Null => {
+            // BSD loopback: 4-byte AF family, then IP
+            if data.len() < 4 {
+                return None;
+            }
+            let af = u32::from_ne_bytes([data[0], data[1], data[2], data[3]]);
+            // AF_INET=2, AF_INET6=24/28/30 depending on OS — sniff version nibble
+            if data.len() > 4 {
+                match data[4] >> 4 {
+                    4 => Some((4, false)),
+                    6 => Some((4, true)),
+                    _ if af == 2 => Some((4, false)),
+                    _ => None,
+                }
+            } else {
+                None
+            }
+        }
+        _ => None,
     }
 }
 
@@ -302,5 +510,31 @@ mod tests {
         assert!(r.text.contains("Hello World") || r.raw.windows(11).any(|w| w == b"Hello World"));
         // raw should be in seq order
         assert_eq!(&r.raw[..], b"Hello World");
+    }
+
+    #[test]
+    fn capture_filter_from_url() {
+        assert_eq!(
+            capture_filter_for_url("https://example.com/path"),
+            Some("host example.com".into())
+        );
+        assert_eq!(
+            capture_filter_for_url("http://api.local:8080/v1"),
+            Some("host api.local and port 8080".into())
+        );
+        assert_eq!(
+            capture_filter_for_url("https://[2001:db8::1]:8443/"),
+            Some("host 2001:db8::1 and port 8443".into())
+        );
+    }
+
+    #[test]
+    fn parse_http_request_object() {
+        let msg = "GET /hello HTTP/1.1\r\nHost: example.com\r\nContent-Type: text/plain\r\n\r\n";
+        let obj = parse_http_message(msg).unwrap();
+        assert!(obj.is_request);
+        assert_eq!(obj.method, "GET");
+        assert_eq!(obj.url, "http://example.com/hello");
+        assert!(obj.data.is_empty());
     }
 }

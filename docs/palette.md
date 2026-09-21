@@ -20,19 +20,19 @@ Bare URIs are accepted: `https://…` opens HTTP; other `scheme://` targets open
 | `stream URI` | Open stream session |
 | `http URI` | Open HTTP session |
 | `listen URI` | Open listen session |
-| `proxy …` | Open proxy URI entry path |
+| `proxy bind|upstream [--tls-intercept]` | Open TCP proxy; optional MITM (HTTP/1.1) |
+| `ca-path` | Flash BitBeak MITM CA PEM path |
 | `diag SPEC` | Diagnose (`dns://…`, `ping://…`, …) |
 | `capture IFACE` | Live capture |
 | `open PATH` | Open pcap/pcapng |
-| `mock` | Mock on `tcp://127.0.0.1:18080` |
-| `mock tcp://…` | Mock on bind URI |
 | `import PATH` | Import Postman / OpenAPI |
 | `codegen NAME [curl\|rust]` | Generate under `./bitbeak-out/` |
 | `run NAME` | Run request from loaded collection |
 | `env NAME` | Set collection environment |
 | `geoip-status` | GeoIP database status |
-| `rpcap host[:port]` | Probe rpcap |
-| `rpcap host[:port] iface` | Live rpcap capture |
+| `rpcap host[:port]` | Probe rpcap (**experimental**) |
+| `rpcap host[:port] iface` | Live rpcap capture (**experimental**) |
+| `fuzz` | Open fuzz overlay (same as **F11**) |
 
 ## HTTP session
 
@@ -45,21 +45,26 @@ Bare URIs are accepted: `https://…` opens HTTP; other `scheme://` targets open
 | `grpc` | Toggle unary gRPC mode |
 | `grpc-desc PATH` | Protobuf descriptor set path |
 | `grpc-type TYPE` | Protobuf message type |
+| `grpc-reply TYPE` | Protobuf reply message type |
 | `gql-introspect` | Load GraphQL introspection query |
-| `pre-script …` | Set Rhai pre-request script |
+| `pre-script …` / `pre-script-show` / `pre-script-clear` | Rhai pre-request script |
+| `test EXPR` / `tests` / `test-clear` | Response asserts |
 | `history` | Focus history pane |
 | `cookies on` / `cookies off` | Cookie jar |
+| `sniff` / `capture-http [iface]` | Capture traffic for this URL host |
 
 ## Capture session
 
 | Command | Action |
 | --- | --- |
 | `follow-tcp` / `follow-udp` / `follow-http` | Follow selected stream |
-| `replay-http` | Follow HTTP stream |
+| `replay-http` | Follow HTTP (if needed) and load first request into an HTTP tab |
+| `sniff` / `capture-http [iface]` | From HTTP tab: open capture, filter on URL host, start sniffing |
 | `conversations` / `endpoints` / `hierarchy` / `expert` | Analysis overlays |
-| `keylog` | Keylog status overlay |
+| `keylog` / `keylog PATH` | Keylog status overlay / load NSS keylog and redigest |
+| `save [path]` / `save-all` | Save displayed (or all) packets; F12 uses default path |
 | `inject` | Inject selected frame |
-| `composer` | Capture composer |
+| `composer` | Open stream composer targeted at selected packet peer |
 | `cfilter …` | Set capture filter |
 | `export-objects` | Export HTTP objects (after `follow-http`) |
 | `names-toggle` | Toggle name resolution |

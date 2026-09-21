@@ -70,8 +70,13 @@ fn prune(keep: usize) -> Result<()> {
 }
 
 pub fn list_history(limit: usize) -> Result<Vec<HistoryEntry>> {
-    let mut entries: Vec<HistoryEntry> = fs::read_dir(history_dir())
-        .unwrap_or_else(|_| fs::read_dir(".").unwrap())
+    let dir = history_dir();
+    let rd = match fs::read_dir(&dir) {
+        Ok(rd) => rd,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e.into()),
+    };
+    let mut entries: Vec<HistoryEntry> = rd
         .filter_map(|e| e.ok())
         .filter_map(|e| {
             let p = e.path();

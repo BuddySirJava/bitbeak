@@ -5,7 +5,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 
-use crate::collections::Collection;
+use crate::collections::{Collection, SavedRequest};
+use crate::http::AuthKind;
 
 pub fn codegen_collection(col: &Collection, lang: &str, out_dir: &Path) -> Result<PathBuf> {
     fs::create_dir_all(out_dir)?;
@@ -35,6 +36,7 @@ fn emit_curl(col: &Collection) -> String {
         let method = r.method.as_deref().unwrap_or("GET");
         out.push_str(&format!("# {}\n", r.name));
         out.push_str(&format!("curl -sS -X {method}"));
+        emit_curl_auth(&mut out, r);
         for (k, v) in &r.headers {
             out.push_str(&format!(
                 " \\\n  -H '{}: {}'",
@@ -47,12 +49,55 @@ fn emit_curl(col: &Collection) -> String {
                 " \\\n  --data-binary @- <<'EOF'\n{}\nEOF\n",
                 r.body
             ));
-            out.push_str(&format!("  '{}'\n\n", r.target.replace('\'', "%27")));
+            out.push_str(&format!("  '{}'\n\n", curl_target(r)));
         } else {
-            out.push_str(&format!(" \\\n  '{}'\n\n", r.target.replace('\'', "%27")));
+            out.push_str(&format!(" \\\n  '{}'\n\n", curl_target(r)));
         }
     }
     out
+}
+
+fn emit_curl_auth(out: &mut String, r: &SavedRequest) {
+    match r.auth {
+        AuthKind::None | AuthKind::ApiKeyQuery => {}
+        AuthKind::Bearer | AuthKind::OAuth2 => {
+            if !r.auth_token.is_empty() {
+                out.push_str(&format!(
+                    " \\\n  -H 'Authorization: Bearer {}'",
+                    r.auth_token.replace('\'', "")
+                ));
+            }
+        }
+        AuthKind::Basic => {
+            out.push_str(&format!(
+                " \\\n  -u '{}:{}'",
+                r.auth_user.replace('\'', ""),
+                r.auth_pass.replace('\'', "")
+            ));
+        }
+        AuthKind::ApiKeyHeader => {
+            if !r.auth_key.is_empty() {
+                out.push_str(&format!(
+                    " \\\n  -H '{}: {}'",
+                    r.auth_key.replace('\'', ""),
+                    r.auth_value.replace('\'', "")
+                ));
+            }
+        }
+    }
+}
+
+fn curl_target(r: &SavedRequest) -> String {
+    let mut target = r.target.clone();
+    if r.auth == AuthKind::ApiKeyQuery && !r.auth_key.is_empty() {
+        let sep = if target.contains('?') { '&' } else { '?' };
+        target = format!(
+            "{target}{sep}{}={}",
+            r.auth_key,
+            urlencoding::encode(&r.auth_value)
+        );
+    }
+    target.replace('\'', "%27")
 }
 
 fn emit_rust(col: &Collection) -> String {
@@ -63,11 +108,13 @@ fn emit_rust(col: &Collection) -> String {
     out.push_str("    let client = Client::new();\n");
     for r in &col.requests {
         let method = r.method.as_deref().unwrap_or("GET").to_ascii_lowercase();
+        let target = rust_target(r);
         out.push_str(&format!("    // {}\n", r.name));
         out.push_str(&format!(
             "    let _ = client.{method}(\"{}\")",
-            r.target.replace('"', "\\\"")
+            target.replace('"', "\\\"")
         ));
+        emit_rust_auth(&mut out, r);
         for (k, v) in &r.headers {
             out.push_str(&format!(
                 "\n        .header(\"{}\", \"{}\")",
@@ -87,6 +134,45 @@ fn emit_rust(col: &Collection) -> String {
     out
 }
 
+fn rust_target(r: &SavedRequest) -> String {
+    let mut target = r.target.clone();
+    if r.auth == AuthKind::ApiKeyQuery && !r.auth_key.is_empty() {
+        let sep = if target.contains('?') { '&' } else { '?' };
+        target = format!("{target}{sep}{}={}", r.auth_key, r.auth_value);
+    }
+    target
+}
+
+fn emit_rust_auth(out: &mut String, r: &SavedRequest) {
+    match r.auth {
+        AuthKind::None | AuthKind::ApiKeyQuery => {}
+        AuthKind::Bearer | AuthKind::OAuth2 => {
+            if !r.auth_token.is_empty() {
+                out.push_str(&format!(
+                    "\n        .bearer_auth(\"{}\")",
+                    r.auth_token.replace('"', "\\\"")
+                ));
+            }
+        }
+        AuthKind::Basic => {
+            out.push_str(&format!(
+                "\n        .basic_auth(\"{}\", Some(\"{}\"))",
+                r.auth_user.replace('"', "\\\""),
+                r.auth_pass.replace('"', "\\\"")
+            ));
+        }
+        AuthKind::ApiKeyHeader => {
+            if !r.auth_key.is_empty() {
+                out.push_str(&format!(
+                    "\n        .header(\"{}\", \"{}\")",
+                    r.auth_key.replace('"', ""),
+                    r.auth_value.replace('"', "\\\"")
+                ));
+            }
+        }
+    }
+}
+
 pub fn default_out_dir() -> PathBuf {
     PathBuf::from("bitbeak-out")
 }
@@ -95,6 +181,7 @@ pub fn default_out_dir() -> PathBuf {
 mod tests {
     use super::*;
     use crate::collections::{Collection, SavedRequest};
+    use crate::http::AuthKind;
     use tempfile::tempdir;
 
     #[test]
@@ -107,6 +194,8 @@ mod tests {
             method: Some("GET".into()),
             headers: vec![("Accept".into(), "*/*".into())],
             body: String::new(),
+            auth: AuthKind::Bearer,
+            auth_token: "secret".into(),
             ..Default::default()
         });
         let dir = tempdir().unwrap();
@@ -114,5 +203,6 @@ mod tests {
         let text = std::fs::read_to_string(p).unwrap();
         assert!(text.contains("curl"));
         assert!(text.contains("example.com"));
+        assert!(text.contains("Authorization: Bearer secret"));
     }
 }
